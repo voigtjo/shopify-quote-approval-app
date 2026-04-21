@@ -1,34 +1,109 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
   url      = "file:dev.sqlite"
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+model ShopInstallation {
+  id            String         @id @default(cuid())
+  shopDomain    String         @unique
+  appName       String?
+  installedAt   DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  approvalCases ApprovalCase[]
+}
+
+model ApprovalCase {
+  id                 String             @id @default(cuid())
+  shopInstallationId String
+  externalReference  String?
+  title              String
+  customerName       String?
+  customerEmail      String?
+  status             ApprovalCaseStatus @default(DRAFT)
+  currencyCode       String             @default("USD")
+  expiresAt          DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  shopInstallation ShopInstallation   @relation(fields: [shopInstallationId], references: [id], onDelete: Cascade)
+  revisions        ApprovalRevision[]
+  actions          ApprovalAction[]
+}
+
+model ApprovalRevision {
+  id             String   @id @default(cuid())
+  approvalCaseId String
+  revisionNumber Int
+  summary        String?
+  payloadJson    String?
+  createdAt      DateTime @default(now())
+
+  approvalCase ApprovalCase @relation(fields: [approvalCaseId], references: [id], onDelete: Cascade)
+
+  @@unique([approvalCaseId, revisionNumber])
+}
+
+model ApprovalAction {
+  id             String             @id @default(cuid())
+  approvalCaseId String
+  actorType      ApprovalActorType
+  actionType     ApprovalActionType
+  note           String?
+  createdAt      DateTime           @default(now())
+
+  approvalCase ApprovalCase @relation(fields: [approvalCaseId], references: [id], onDelete: Cascade)
+}
+
+enum ApprovalCaseStatus {
+  DRAFT
+  SENT_FOR_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
+  REJECTED
+  EXPIRED
+  DRAFT_ORDER_CREATED
+  INVOICE_SENT
+  CONVERTED_TO_ORDER
+}
+
+enum ApprovalActorType {
+  MERCHANT
+  CUSTOMER
+  SYSTEM
+}
+
+enum ApprovalActionType {
+  CREATE_CASE
+  ADD_REVISION
+  SEND_FOR_REVIEW
+  REQUEST_CHANGES
+  APPROVE
+  REJECT
+  EXPIRE
+  CREATE_DRAFT_ORDER
+  SEND_INVOICE
 }

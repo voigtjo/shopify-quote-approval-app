@@ -17,6 +17,7 @@ import db from "../db.server";
 
 type ActionErrors = {
   summary?: string;
+  form?: string;
 };
 
 type ActionData = {
@@ -75,22 +76,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   }
 
   const formData = await request.formData();
-  const summary = String(formData.get("summary") || "").trim();
-
-  const errors: ActionErrors = {};
-
-  if (!summary) {
-    errors.summary = "Revision summary is required.";
-  }
-
-  if (Object.keys(errors).length > 0) {
-    return {
-      errors,
-      values: {
-        summary,
-      },
-    } satisfies ActionData;
-  }
+  const intent = String(formData.get("intent") || "");
 
   const shopInstallation = await db.shopInstallation.findUnique({
     where: { shopDomain: session.shop },
@@ -117,30 +103,180 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     throw new Response("Approval case not found", { status: 404 });
   }
 
-  const nextRevisionNumber = (approvalCase.revisions[0]?.revisionNumber ?? 0) + 1;
+  if (intent === "addRevision") {
+    const summary = String(formData.get("summary") || "").trim();
 
-  await db.approvalRevision.create({
-    data: {
-      approvalCaseId: approvalCase.id,
-      revisionNumber: nextRevisionNumber,
-      summary,
-      payloadJson: JSON.stringify({
-        summary,
-        createdFrom: "case-detail-form",
+    const errors: ActionErrors = {};
+    if (!summary) {
+      errors.summary = "Revision summary is required.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return {
+        errors,
+        values: {
+          summary,
+        },
+      } satisfies ActionData;
+    }
+
+    const nextRevisionNumber =
+      (approvalCase.revisions[0]?.revisionNumber ?? 0) + 1;
+
+    await db.$transaction([
+      db.approvalRevision.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          revisionNumber: nextRevisionNumber,
+          summary,
+          payloadJson: JSON.stringify({
+            summary,
+            createdFrom: "case-detail-form",
+          }),
+        },
       }),
-    },
-  });
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "MERCHANT",
+          actionType: "ADD_REVISION",
+          note: `Revision ${nextRevisionNumber} added from case detail page`,
+        },
+      }),
+    ]);
 
-  await db.approvalAction.create({
-    data: {
-      approvalCaseId: approvalCase.id,
-      actorType: "MERCHANT",
-      actionType: "ADD_REVISION",
-      note: `Revision ${nextRevisionNumber} added from case detail page`,
-    },
-  });
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
 
-  return redirect(`/app/cases/${approvalCase.id}`);
+  if (intent === "sendForReview") {
+    if (approvalCase.status !== "DRAFT") {
+      return {
+        errors: {
+          form: "Only draft cases can be sent for review.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    await db.$transaction([
+      db.approvalCase.update({
+        where: { id: approvalCase.id },
+        data: {
+          status: "SENT_FOR_REVIEW",
+        },
+      }),
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "MERCHANT",
+          actionType: "SEND_FOR_REVIEW",
+          note: "Case sent for review from case detail page",
+        },
+      }),
+    ]);
+
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
+
+  if (intent === "approve") {
+    if (approvalCase.status !== "SENT_FOR_REVIEW") {
+      return {
+        errors: {
+          form: "Only cases in SENT_FOR_REVIEW can be approved.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    await db.$transaction([
+      db.approvalCase.update({
+        where: { id: approvalCase.id },
+        data: {
+          status: "APPROVED",
+        },
+      }),
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "MERCHANT",
+          actionType: "APPROVE",
+          note: "Case approved from case detail page",
+        },
+      }),
+    ]);
+
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
+
+  if (intent === "requestChanges") {
+    if (approvalCase.status !== "SENT_FOR_REVIEW") {
+      return {
+        errors: {
+          form: "Only cases in SENT_FOR_REVIEW can request changes.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    await db.$transaction([
+      db.approvalCase.update({
+        where: { id: approvalCase.id },
+        data: {
+          status: "CHANGES_REQUESTED",
+        },
+      }),
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "MERCHANT",
+          actionType: "REQUEST_CHANGES",
+          note: "Changes requested from case detail page",
+        },
+      }),
+    ]);
+
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
+
+  if (intent === "reject") {
+    if (approvalCase.status !== "SENT_FOR_REVIEW") {
+      return {
+        errors: {
+          form: "Only cases in SENT_FOR_REVIEW can be rejected.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    await db.$transaction([
+      db.approvalCase.update({
+        where: { id: approvalCase.id },
+        data: {
+          status: "REJECTED",
+        },
+      }),
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "MERCHANT",
+          actionType: "REJECT",
+          note: "Case rejected from case detail page",
+        },
+      }),
+    ]);
+
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
+
+  throw new Response("Unsupported action", { status: 400 });
 };
 
 export default function ApprovalCaseDetail() {
@@ -148,7 +284,17 @@ export default function ApprovalCaseDetail() {
   const actionData = useActionData<typeof action>() as ActionData | undefined;
   const navigation = useNavigation();
 
-  const isSubmitting = navigation.state === "submitting";
+  const currentIntent = navigation.formData?.get("intent");
+  const isSubmittingRevision =
+    navigation.state === "submitting" && currentIntent === "addRevision";
+  const isSubmittingSend =
+    navigation.state === "submitting" && currentIntent === "sendForReview";
+  const isSubmittingApprove =
+    navigation.state === "submitting" && currentIntent === "approve";
+  const isSubmittingRequestChanges =
+    navigation.state === "submitting" && currentIntent === "requestChanges";
+  const isSubmittingReject =
+    navigation.state === "submitting" && currentIntent === "reject";
 
   return (
     <s-page heading={approvalCase.title}>
@@ -168,8 +314,87 @@ export default function ApprovalCaseDetail() {
         </s-paragraph>
       </s-section>
 
+      <s-section heading="Workflow">
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+          <Form method="post">
+            <input type="hidden" name="intent" value="sendForReview" />
+            <button
+              type="submit"
+              disabled={isSubmittingSend || approvalCase.status !== "DRAFT"}
+            >
+              {isSubmittingSend ? "Sending..." : "Send for review"}
+            </button>
+          </Form>
+
+          <Form method="post">
+            <input type="hidden" name="intent" value="approve" />
+            <button
+              type="submit"
+              disabled={
+                isSubmittingApprove || approvalCase.status !== "SENT_FOR_REVIEW"
+              }
+            >
+              {isSubmittingApprove ? "Approving..." : "Approve"}
+            </button>
+          </Form>
+
+          <Form method="post">
+            <input type="hidden" name="intent" value="requestChanges" />
+            <button
+              type="submit"
+              disabled={
+                isSubmittingRequestChanges ||
+                approvalCase.status !== "SENT_FOR_REVIEW"
+              }
+            >
+              {isSubmittingRequestChanges
+                ? "Requesting..."
+                : "Request changes"}
+            </button>
+          </Form>
+
+          <Form method="post">
+            <input type="hidden" name="intent" value="reject" />
+            <button
+              type="submit"
+              disabled={
+                isSubmittingReject || approvalCase.status !== "SENT_FOR_REVIEW"
+              }
+            >
+              {isSubmittingReject ? "Rejecting..." : "Reject"}
+            </button>
+          </Form>
+        </div>
+
+        {approvalCase.status === "DRAFT" ? (
+          <p style={{ marginTop: "8px" }}>
+            This case is currently in DRAFT and can be sent for review.
+          </p>
+        ) : null}
+
+        {approvalCase.status === "SENT_FOR_REVIEW" ? (
+          <p style={{ marginTop: "8px" }}>
+            This case is awaiting a decision.
+          </p>
+        ) : null}
+
+        {approvalCase.status !== "DRAFT" &&
+        approvalCase.status !== "SENT_FOR_REVIEW" ? (
+          <p style={{ marginTop: "8px" }}>
+            This case already reached a later workflow state.
+          </p>
+        ) : null}
+
+        {actionData?.errors?.form ? (
+          <p style={{ color: "crimson", marginTop: "8px" }}>
+            {actionData.errors.form}
+          </p>
+        ) : null}
+      </s-section>
+
       <s-section heading="Add revision">
         <Form method="post">
+          <input type="hidden" name="intent" value="addRevision" />
           <div
             style={{
               display: "grid",
@@ -196,8 +421,8 @@ export default function ApprovalCaseDetail() {
             </div>
 
             <div>
-              <button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? "Adding..." : "Add revision"}
+              <button type="submit" disabled={isSubmittingRevision}>
+                {isSubmittingRevision ? "Adding..." : "Add revision"}
               </button>
             </div>
           </div>

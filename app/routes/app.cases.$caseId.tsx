@@ -27,6 +27,75 @@ type ActionData = {
   };
 };
 
+type CaseStatus =
+  | "DRAFT"
+  | "SENT_FOR_REVIEW"
+  | "CHANGES_REQUESTED"
+  | "APPROVED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "DRAFT_ORDER_CREATED"
+  | "INVOICE_SENT"
+  | "CONVERTED_TO_ORDER";
+
+function formatStatus(status: string) {
+  return status.replaceAll("_", " ");
+}
+
+function formatActionType(actionType: string) {
+  return actionType.replaceAll("_", " ");
+}
+
+function getNextStep(status: CaseStatus) {
+  switch (status) {
+    case "DRAFT":
+      return "Review the case details, add revisions if needed, then send the case for review.";
+    case "SENT_FOR_REVIEW":
+      return "Choose one decision: approve, request changes, or reject the case.";
+    case "CHANGES_REQUESTED":
+      return "Update the case, add a revision that documents the change, then send it for review again.";
+    case "APPROVED":
+      return "Prepare the Shopify handoff. The next product step will be Draft Order creation.";
+    case "REJECTED":
+      return "This case is closed unless you create a replacement case or restart the flow later.";
+    case "EXPIRED":
+      return "Review whether the case should be reopened or replaced.";
+    case "DRAFT_ORDER_CREATED":
+      return "Continue with the Shopify draft order process.";
+    case "INVOICE_SENT":
+      return "Wait for customer payment or follow up on the invoice.";
+    case "CONVERTED_TO_ORDER":
+      return "The approval flow is complete and the Shopify order now exists.";
+    default:
+      return "Review the case and decide on the next action.";
+  }
+}
+
+function getRemainingSteps(status: CaseStatus) {
+  switch (status) {
+    case "DRAFT":
+      return ["Optional revisions", "Send for review", "Decision", "Shopify handoff"];
+    case "SENT_FOR_REVIEW":
+      return ["Decision", "Shopify handoff"];
+    case "CHANGES_REQUESTED":
+      return ["Add revision", "Send for review again", "Decision", "Shopify handoff"];
+    case "APPROVED":
+      return ["Shopify handoff"];
+    case "REJECTED":
+      return ["No required steps remaining"];
+    case "EXPIRED":
+      return ["Review whether the flow should continue"];
+    case "DRAFT_ORDER_CREATED":
+      return ["Invoice or order continuation"];
+    case "INVOICE_SENT":
+      return ["Wait for payment / conversion to order"];
+    case "CONVERTED_TO_ORDER":
+      return ["No required steps remaining"];
+    default:
+      return ["Review the case"];
+  }
+}
+
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
 
@@ -107,8 +176,17 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     const summary = String(formData.get("summary") || "").trim();
 
     const errors: ActionErrors = {};
+
     if (!summary) {
       errors.summary = "Revision summary is required.";
+    }
+
+    if (
+      approvalCase.status === "APPROVED" ||
+      approvalCase.status === "REJECTED"
+    ) {
+      errors.form =
+        "Revisions cannot be added after a case is approved or rejected.";
     }
 
     if (Object.keys(errors).length > 0) {
@@ -149,10 +227,13 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   }
 
   if (intent === "sendForReview") {
-    if (approvalCase.status !== "DRAFT") {
+    if (
+      approvalCase.status !== "DRAFT" &&
+      approvalCase.status !== "CHANGES_REQUESTED"
+    ) {
       return {
         errors: {
-          form: "Only draft cases can be sent for review.",
+          form: "Only draft cases or cases with requested changes can be sent for review.",
         },
         values: {
           summary: "",
@@ -172,7 +253,10 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           approvalCaseId: approvalCase.id,
           actorType: "MERCHANT",
           actionType: "SEND_FOR_REVIEW",
-          note: "Case sent for review from case detail page",
+          note:
+            approvalCase.status === "CHANGES_REQUESTED"
+              ? "Case updated and sent for review again"
+              : "Case sent for review from case detail page",
         },
       }),
     ]);
@@ -296,31 +380,148 @@ export default function ApprovalCaseDetail() {
   const isSubmittingReject =
     navigation.state === "submitting" && currentIntent === "reject";
 
-  return (
-    <s-page heading={approvalCase.title}>
-      <s-section heading="Overview">
-        <s-paragraph>Status: {approvalCase.status}</s-paragraph>
-        <s-paragraph>
-          Customer: {approvalCase.customerName || "—"}
-        </s-paragraph>
-        <s-paragraph>
-          Email: {approvalCase.customerEmail || "—"}
-        </s-paragraph>
-        <s-paragraph>
-          External reference: {approvalCase.externalReference || "—"}
-        </s-paragraph>
-        <s-paragraph>
-          Currency: {approvalCase.currencyCode}
-        </s-paragraph>
-      </s-section>
+  const status = approvalCase.status as CaseStatus;
+  const nextStep = getNextStep(status);
+  const remainingSteps = getRemainingSteps(status);
 
-      <s-section heading="Workflow">
-        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+  const canSendForReview =
+    approvalCase.status === "DRAFT" ||
+    approvalCase.status === "CHANGES_REQUESTED";
+  const canApprove = approvalCase.status === "SENT_FOR_REVIEW";
+  const canRequestChanges = approvalCase.status === "SENT_FOR_REVIEW";
+  const canReject = approvalCase.status === "SENT_FOR_REVIEW";
+  const canAddRevision =
+    approvalCase.status !== "APPROVED" &&
+    approvalCase.status !== "REJECTED";
+
+  return (
+    <div style={{ display: "grid", gap: "16px" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "24px",
+            fontWeight: 700,
+            lineHeight: 1.2,
+          }}
+        >
+          {approvalCase.title}
+        </div>
+
+        <Link to="/app/cases">← Back to cases</Link>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gap: "16px",
+          gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 0.8fr)",
+        }}
+      >
+        <div
+          style={{
+            border: "1px solid #E5E7EB",
+            borderRadius: "16px",
+            background: "#FFFFFF",
+            padding: "16px",
+            display: "grid",
+            gap: "12px",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "14px",
+              fontWeight: 700,
+            }}
+          >
+            Overview
+          </div>
+
+          <div>Status: {formatStatus(approvalCase.status)}</div>
+          <div>Customer: {approvalCase.customerName || "—"}</div>
+          <div>Email: {approvalCase.customerEmail || "—"}</div>
+          <div>External reference: {approvalCase.externalReference || "—"}</div>
+          <div>Currency: {approvalCase.currencyCode}</div>
+        </div>
+
+        <div
+          style={{
+            border: "1px solid #E5E7EB",
+            borderRadius: "16px",
+            background: "#FFFFFF",
+            padding: "16px",
+            display: "grid",
+            gap: "12px",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "14px",
+              fontWeight: 700,
+            }}
+          >
+            Next step
+          </div>
+
+          <div>{nextStep}</div>
+
+          <div>
+            <div
+              style={{
+                fontSize: "12px",
+                color: "#6B7280",
+                marginBottom: "6px",
+              }}
+            >
+              Remaining path
+            </div>
+            <ul style={{ margin: 0, paddingLeft: "18px" }}>
+              {remainingSteps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: "16px",
+          background: "#FFFFFF",
+          padding: "16px",
+          display: "grid",
+          gap: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "14px",
+            fontWeight: 700,
+          }}
+        >
+          Workflow actions
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "8px",
+            flexWrap: "wrap",
+          }}
+        >
           <Form method="post">
             <input type="hidden" name="intent" value="sendForReview" />
             <button
               type="submit"
-              disabled={isSubmittingSend || approvalCase.status !== "DRAFT"}
+              disabled={isSubmittingSend || !canSendForReview}
             >
               {isSubmittingSend ? "Sending..." : "Send for review"}
             </button>
@@ -328,12 +529,7 @@ export default function ApprovalCaseDetail() {
 
           <Form method="post">
             <input type="hidden" name="intent" value="approve" />
-            <button
-              type="submit"
-              disabled={
-                isSubmittingApprove || approvalCase.status !== "SENT_FOR_REVIEW"
-              }
-            >
+            <button type="submit" disabled={isSubmittingApprove || !canApprove}>
               {isSubmittingApprove ? "Approving..." : "Approve"}
             </button>
           </Form>
@@ -342,10 +538,7 @@ export default function ApprovalCaseDetail() {
             <input type="hidden" name="intent" value="requestChanges" />
             <button
               type="submit"
-              disabled={
-                isSubmittingRequestChanges ||
-                approvalCase.status !== "SENT_FOR_REVIEW"
-              }
+              disabled={isSubmittingRequestChanges || !canRequestChanges}
             >
               {isSubmittingRequestChanges
                 ? "Requesting..."
@@ -355,51 +548,43 @@ export default function ApprovalCaseDetail() {
 
           <Form method="post">
             <input type="hidden" name="intent" value="reject" />
-            <button
-              type="submit"
-              disabled={
-                isSubmittingReject || approvalCase.status !== "SENT_FOR_REVIEW"
-              }
-            >
+            <button type="submit" disabled={isSubmittingReject || !canReject}>
               {isSubmittingReject ? "Rejecting..." : "Reject"}
             </button>
           </Form>
         </div>
 
-        {approvalCase.status === "DRAFT" ? (
-          <p style={{ marginTop: "8px" }}>
-            This case is currently in DRAFT and can be sent for review.
-          </p>
-        ) : null}
-
-        {approvalCase.status === "SENT_FOR_REVIEW" ? (
-          <p style={{ marginTop: "8px" }}>
-            This case is awaiting a decision.
-          </p>
-        ) : null}
-
-        {approvalCase.status !== "DRAFT" &&
-        approvalCase.status !== "SENT_FOR_REVIEW" ? (
-          <p style={{ marginTop: "8px" }}>
-            This case already reached a later workflow state.
-          </p>
-        ) : null}
-
         {actionData?.errors?.form ? (
-          <p style={{ color: "crimson", marginTop: "8px" }}>
-            {actionData.errors.form}
-          </p>
+          <p style={{ color: "crimson", margin: 0 }}>{actionData.errors.form}</p>
         ) : null}
-      </s-section>
+      </div>
 
-      <s-section heading="Add revision">
+      <div
+        style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: "16px",
+          background: "#FFFFFF",
+          padding: "16px",
+          display: "grid",
+          gap: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "14px",
+            fontWeight: 700,
+          }}
+        >
+          Add revision
+        </div>
+
         <Form method="post">
           <input type="hidden" name="intent" value="addRevision" />
           <div
             style={{
               display: "grid",
               gap: "12px",
-              maxWidth: "640px",
+              maxWidth: "720px",
             }}
           >
             <div>
@@ -412,6 +597,7 @@ export default function ApprovalCaseDetail() {
                 defaultValue={actionData?.values?.summary ?? ""}
                 rows={4}
                 style={{ width: "100%", padding: "8px" }}
+                disabled={!canAddRevision}
               />
               {actionData?.errors?.summary ? (
                 <p style={{ color: "crimson", marginTop: "4px" }}>
@@ -421,67 +607,118 @@ export default function ApprovalCaseDetail() {
             </div>
 
             <div>
-              <button type="submit" disabled={isSubmittingRevision}>
+              <button
+                type="submit"
+                disabled={isSubmittingRevision || !canAddRevision}
+              >
                 {isSubmittingRevision ? "Adding..." : "Add revision"}
               </button>
             </div>
+
+            {!canAddRevision ? (
+              <p style={{ margin: 0, color: "#6B7280" }}>
+                Revisions are disabled because this case is already completed.
+              </p>
+            ) : null}
           </div>
         </Form>
-      </s-section>
+      </div>
 
-      <s-section heading="Revisions">
+      <div
+        style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: "16px",
+          background: "#FFFFFF",
+          padding: "16px",
+          display: "grid",
+          gap: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "14px",
+            fontWeight: 700,
+          }}
+        >
+          Revisions
+        </div>
+
         {approvalCase.revisions.length === 0 ? (
-          <s-paragraph>No revisions available.</s-paragraph>
+          <div style={{ color: "#6B7280" }}>No revisions available.</div>
         ) : (
           <div style={{ display: "grid", gap: "12px" }}>
             {approvalCase.revisions.map((revision) => (
-              <s-box
+              <div
                 key={revision.id}
-                padding="base"
-                border="base"
-                borderRadius="large"
+                style={{
+                  border: "1px solid #E5E7EB",
+                  borderRadius: "12px",
+                  padding: "14px",
+                  background: "#FFFFFF",
+                }}
               >
-                <s-heading>Revision {revision.revisionNumber}</s-heading>
-                <s-paragraph>
-                  Summary: {revision.summary || "—"}
-                </s-paragraph>
-                <s-paragraph>
+                <div style={{ fontWeight: 700, marginBottom: "8px" }}>
+                  Revision {revision.revisionNumber}
+                </div>
+                <div>Summary: {revision.summary || "—"}</div>
+                <div style={{ marginTop: "6px", color: "#374151" }}>
                   Payload: {revision.payloadJson || "—"}
-                </s-paragraph>
-              </s-box>
+                </div>
+              </div>
             ))}
           </div>
         )}
-      </s-section>
+      </div>
 
-      <s-section heading="Actions">
+      <div
+        style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: "16px",
+          background: "#FFFFFF",
+          padding: "16px",
+          display: "grid",
+          gap: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "14px",
+            fontWeight: 700,
+          }}
+        >
+          Audit trail
+        </div>
+
         {approvalCase.actions.length === 0 ? (
-          <s-paragraph>No actions available.</s-paragraph>
+          <div style={{ color: "#6B7280" }}>No activity recorded yet.</div>
         ) : (
           <div style={{ display: "grid", gap: "12px" }}>
             {approvalCase.actions.map((action) => (
-              <s-box
+              <div
                 key={action.id}
-                padding="base"
-                border="base"
-                borderRadius="large"
+                style={{
+                  borderLeft: "3px solid #D1D5DB",
+                  paddingLeft: "12px",
+                }}
               >
-                <s-heading>{action.actionType}</s-heading>
-                <s-paragraph>Actor: {action.actorType}</s-paragraph>
-                <s-paragraph>Note: {action.note || "—"}</s-paragraph>
-                <s-paragraph>
-                  Created at: {new Date(action.createdAt).toLocaleString()}
-                </s-paragraph>
-              </s-box>
+                <div style={{ fontWeight: 700 }}>
+                  {formatActionType(action.actionType)}
+                </div>
+                <div style={{ fontSize: "14px", color: "#374151" }}>
+                  Actor: {action.actorType}
+                </div>
+                <div style={{ fontSize: "14px", color: "#374151" }}>
+                  {action.note || "—"}
+                </div>
+                <div style={{ fontSize: "12px", color: "#6B7280", marginTop: "4px" }}>
+                  {new Date(action.createdAt).toLocaleString()}
+                </div>
+              </div>
             ))}
           </div>
         )}
-      </s-section>
-
-      <s-section heading="Navigation">
-        <Link to="/app">← Back to dashboard</Link>
-      </s-section>
-    </s-page>
+      </div>
+    </div>
   );
 }
 

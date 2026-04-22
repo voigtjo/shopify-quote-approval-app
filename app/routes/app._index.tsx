@@ -3,10 +3,31 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { Form, redirect, useLoaderData } from "react-router";
+import {
+  Form,
+  Link,
+  redirect,
+  useActionData,
+  useLoaderData,
+  useNavigation,
+} from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+
+type ActionErrors = {
+  title?: string;
+  customerEmail?: string;
+};
+
+type ActionData = {
+  errors?: ActionErrors;
+  values?: {
+    title: string;
+    customerName: string;
+    customerEmail: string;
+  };
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -44,6 +65,33 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
 
+  const formData = await request.formData();
+
+  const title = String(formData.get("title") || "").trim();
+  const customerName = String(formData.get("customerName") || "").trim();
+  const customerEmail = String(formData.get("customerEmail") || "").trim();
+
+  const errors: ActionErrors = {};
+
+  if (!title) {
+    errors.title = "Title is required.";
+  }
+
+  if (customerEmail && !customerEmail.includes("@")) {
+    errors.customerEmail = "Customer email must look like an email address.";
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return {
+      errors,
+      values: {
+        title,
+        customerName,
+        customerEmail,
+      },
+    } satisfies ActionData;
+  }
+
   const shopInstallation = await db.shopInstallation.upsert({
     where: { shopDomain: session.shop },
     update: {},
@@ -60,18 +108,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   await db.approvalCase.create({
     data: {
       shopInstallationId: shopInstallation.id,
-      externalReference: `TEST-${existingCount + 1}`,
-      title: `Test approval case ${existingCount + 1}`,
-      customerName: "Max Example",
-      customerEmail: "max@example.com",
+      externalReference: `CASE-${existingCount + 1}`,
+      title,
+      customerName: customerName || null,
+      customerEmail: customerEmail || null,
       currencyCode: "USD",
       revisions: {
         create: {
           revisionNumber: 1,
-          summary: "Initial test revision",
+          summary: "Initial merchant-created revision",
           payloadJson: JSON.stringify({
-            source: "manual test creation",
-            createdFrom: "dashboard",
+            title,
+            customerName,
+            customerEmail,
+            createdFrom: "dashboard-form",
           }),
         },
       },
@@ -79,7 +129,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         create: {
           actorType: "MERCHANT",
           actionType: "CREATE_CASE",
-          note: "Initial test case created from dashboard",
+          note: "Approval case created from dashboard form",
         },
       },
     },
@@ -90,6 +140,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function Index() {
   const { shopDomain, approvalCases } = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>() as ActionData | undefined;
+  const navigation = useNavigation();
+
+  const isSubmitting = navigation.state === "submitting";
 
   return (
     <s-page heading="Quote Approval Dashboard">
@@ -99,20 +153,87 @@ export default function Index() {
         </s-paragraph>
       </s-section>
 
-      <s-section heading="Quick action">
+      <s-section heading="Create approval case">
         <Form method="post">
-          <button type="submit">Create test approval case</button>
+          <div
+            style={{
+              display: "grid",
+              gap: "12px",
+              maxWidth: "640px",
+            }}
+          >
+            <div>
+              <label htmlFor="title" style={{ display: "block", fontWeight: 600 }}>
+                Title
+              </label>
+              <input
+                id="title"
+                name="title"
+                type="text"
+                defaultValue={actionData?.values?.title ?? ""}
+                style={{ width: "100%", padding: "8px" }}
+              />
+              {actionData?.errors?.title ? (
+                <p style={{ color: "crimson", marginTop: "4px" }}>
+                  {actionData.errors.title}
+                </p>
+              ) : null}
+            </div>
+
+            <div>
+              <label
+                htmlFor="customerName"
+                style={{ display: "block", fontWeight: 600 }}
+              >
+                Customer name
+              </label>
+              <input
+                id="customerName"
+                name="customerName"
+                type="text"
+                defaultValue={actionData?.values?.customerName ?? ""}
+                style={{ width: "100%", padding: "8px" }}
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="customerEmail"
+                style={{ display: "block", fontWeight: 600 }}
+              >
+                Customer email
+              </label>
+              <input
+                id="customerEmail"
+                name="customerEmail"
+                type="email"
+                defaultValue={actionData?.values?.customerEmail ?? ""}
+                style={{ width: "100%", padding: "8px" }}
+              />
+              {actionData?.errors?.customerEmail ? (
+                <p style={{ color: "crimson", marginTop: "4px" }}>
+                  {actionData.errors.customerEmail}
+                </p>
+              ) : null}
+            </div>
+
+            <div>
+              <button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? "Creating..." : "Create approval case"}
+              </button>
+            </div>
+          </div>
         </Form>
       </s-section>
 
       <s-section heading="Approval cases">
         {approvalCases.length === 0 ? (
           <s-paragraph>
-            No approval cases exist yet. Create the first one using the button
+            No approval cases exist yet. Create the first one using the form
             above.
           </s-paragraph>
         ) : (
-          <s-box>
+          <div style={{ display: "grid", gap: "16px" }}>
             {approvalCases.map((approvalCase) => (
               <s-box
                 key={approvalCase.id}
@@ -135,9 +256,13 @@ export default function Index() {
                 <s-paragraph>
                   Last action: {approvalCase.actions[0]?.actionType ?? "—"}
                 </s-paragraph>
+
+                <div style={{ marginTop: "12px" }}>
+                  <Link to={`/app/cases/${approvalCase.id}`}>Open case</Link>
+                </div>
               </s-box>
             ))}
-          </s-box>
+          </div>
         )}
       </s-section>
     </s-page>

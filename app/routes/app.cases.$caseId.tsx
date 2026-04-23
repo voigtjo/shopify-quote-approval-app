@@ -38,12 +38,12 @@ type CaseStatus =
   | "INVOICE_SENT"
   | "CONVERTED_TO_ORDER";
 
-function formatStatus(status: string) {
-  return status.replaceAll("_", " ");
-}
-
-function formatActionType(actionType: string) {
-  return actionType.replaceAll("_", " ");
+function formatLabel(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function getNextStep(status: CaseStatus) {
@@ -93,6 +93,41 @@ function getRemainingSteps(status: CaseStatus) {
       return ["No required steps remaining"];
     default:
       return ["Review the case"];
+  }
+}
+
+function getStatusBadgeStyle(status: string): React.CSSProperties {
+  switch (status) {
+    case "DRAFT":
+      return {
+        background: "#F3F4F6",
+        color: "#374151",
+      };
+    case "SENT_FOR_REVIEW":
+      return {
+        background: "#DBEAFE",
+        color: "#1D4ED8",
+      };
+    case "CHANGES_REQUESTED":
+      return {
+        background: "#FEF3C7",
+        color: "#92400E",
+      };
+    case "APPROVED":
+      return {
+        background: "#DCFCE7",
+        color: "#166534",
+      };
+    case "REJECTED":
+      return {
+        background: "#FEE2E2",
+        color: "#991B1B",
+      };
+    default:
+      return {
+        background: "#F3F4F6",
+        color: "#374151",
+      };
   }
 }
 
@@ -405,14 +440,33 @@ export default function ApprovalCaseDetail() {
           flexWrap: "wrap",
         }}
       >
-        <div
-          style={{
-            fontSize: "24px",
-            fontWeight: 700,
-            lineHeight: 1.2,
-          }}
-        >
-          {approvalCase.title}
+        <div style={{ display: "grid", gap: "8px" }}>
+          <div
+            style={{
+              fontSize: "24px",
+              fontWeight: 700,
+              lineHeight: 1.2,
+            }}
+          >
+            {approvalCase.title}
+          </div>
+
+          <div>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                minHeight: "30px",
+                padding: "4px 12px",
+                borderRadius: "999px",
+                fontSize: "12px",
+                fontWeight: 700,
+                ...getStatusBadgeStyle(approvalCase.status),
+              }}
+            >
+              {formatLabel(approvalCase.status)}
+            </span>
+          </div>
         </div>
 
         <Link to="/app/cases">← Back to cases</Link>
@@ -444,11 +498,19 @@ export default function ApprovalCaseDetail() {
             Overview
           </div>
 
-          <div>Status: {formatStatus(approvalCase.status)}</div>
           <div>Customer: {approvalCase.customerName || "—"}</div>
           <div>Email: {approvalCase.customerEmail || "—"}</div>
           <div>External reference: {approvalCase.externalReference || "—"}</div>
           <div>Currency: {approvalCase.currencyCode}</div>
+          <div>
+            Latest revision: {approvalCase.revisions[0]?.revisionNumber ?? "—"}
+          </div>
+          <div>
+            Last action:{" "}
+            {approvalCase.actions[0]
+              ? formatLabel(approvalCase.actions[0].actionType)
+              : "—"}
+          </div>
         </div>
 
         <div
@@ -575,6 +637,57 @@ export default function ApprovalCaseDetail() {
             fontWeight: 700,
           }}
         >
+          Audit trail
+        </div>
+
+        {approvalCase.actions.length === 0 ? (
+          <div style={{ color: "#6B7280" }}>No activity recorded yet.</div>
+        ) : (
+          <div style={{ display: "grid", gap: "14px" }}>
+            {approvalCase.actions.map((action) => (
+              <div
+                key={action.id}
+                style={{
+                  display: "grid",
+                  gap: "4px",
+                  borderLeft: "3px solid #D1D5DB",
+                  paddingLeft: "12px",
+                }}
+              >
+                <div style={{ fontWeight: 700 }}>
+                  {formatLabel(action.actionType)}
+                </div>
+                <div style={{ fontSize: "14px", color: "#374151" }}>
+                  Actor: {formatLabel(action.actorType)}
+                </div>
+                <div style={{ fontSize: "14px", color: "#374151" }}>
+                  {action.note || "—"}
+                </div>
+                <div style={{ fontSize: "12px", color: "#6B7280" }}>
+                  {new Date(action.createdAt).toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: "16px",
+          background: "#FFFFFF",
+          padding: "16px",
+          display: "grid",
+          gap: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "14px",
+            fontWeight: 700,
+          }}
+        >
           Add revision
         </div>
 
@@ -663,55 +776,6 @@ export default function ApprovalCaseDetail() {
                 <div>Summary: {revision.summary || "—"}</div>
                 <div style={{ marginTop: "6px", color: "#374151" }}>
                   Payload: {revision.payloadJson || "—"}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div
-        style={{
-          border: "1px solid #E5E7EB",
-          borderRadius: "16px",
-          background: "#FFFFFF",
-          padding: "16px",
-          display: "grid",
-          gap: "12px",
-        }}
-      >
-        <div
-          style={{
-            fontSize: "14px",
-            fontWeight: 700,
-          }}
-        >
-          Audit trail
-        </div>
-
-        {approvalCase.actions.length === 0 ? (
-          <div style={{ color: "#6B7280" }}>No activity recorded yet.</div>
-        ) : (
-          <div style={{ display: "grid", gap: "12px" }}>
-            {approvalCase.actions.map((action) => (
-              <div
-                key={action.id}
-                style={{
-                  borderLeft: "3px solid #D1D5DB",
-                  paddingLeft: "12px",
-                }}
-              >
-                <div style={{ fontWeight: 700 }}>
-                  {formatActionType(action.actionType)}
-                </div>
-                <div style={{ fontSize: "14px", color: "#374151" }}>
-                  Actor: {action.actorType}
-                </div>
-                <div style={{ fontSize: "14px", color: "#374151" }}>
-                  {action.note || "—"}
-                </div>
-                <div style={{ fontSize: "12px", color: "#6B7280", marginTop: "4px" }}>
-                  {new Date(action.createdAt).toLocaleString()}
                 </div>
               </div>
             ))}

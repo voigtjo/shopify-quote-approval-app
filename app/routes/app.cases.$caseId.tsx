@@ -38,6 +38,22 @@ type CaseStatus =
   | "INVOICE_SENT"
   | "CONVERTED_TO_ORDER";
 
+type DraftOrderCreateResponse = {
+  data?: {
+    draftOrderCreate?: {
+      draftOrder?: {
+        id: string;
+        name: string;
+        invoiceUrl?: string | null;
+      } | null;
+      userErrors?: Array<{
+        field?: string[] | null;
+        message: string;
+      }>;
+    };
+  };
+};
+
 function formatLabel(value: string) {
   return value
     .toLowerCase()
@@ -61,7 +77,7 @@ function getNextStep(status: CaseStatus) {
     case "EXPIRED":
       return "Review whether the case should be reopened or replaced.";
     case "DRAFT_ORDER_CREATED":
-      return "Continue with the Shopify draft order process.";
+      return "Open the draft order or invoice and continue in Shopify.";
     case "INVOICE_SENT":
       return "Wait for customer payment or follow up on the invoice.";
     case "CONVERTED_TO_ORDER":
@@ -80,13 +96,13 @@ function getRemainingSteps(status: CaseStatus) {
     case "CHANGES_REQUESTED":
       return ["Add revision", "Send for review again", "Decision", "Shopify handoff"];
     case "APPROVED":
-      return ["Shopify handoff"];
+      return ["Prepare Shopify handoff", "Create Draft Order"];
     case "REJECTED":
       return ["No required steps remaining"];
     case "EXPIRED":
       return ["Review whether the flow should continue"];
     case "DRAFT_ORDER_CREATED":
-      return ["Invoice or order continuation"];
+      return ["Send invoice or continue with order handling"];
     case "INVOICE_SENT":
       return ["Wait for payment / conversion to order"];
     case "CONVERTED_TO_ORDER":
@@ -99,36 +115,35 @@ function getRemainingSteps(status: CaseStatus) {
 function getStatusBadgeStyle(status: string): React.CSSProperties {
   switch (status) {
     case "DRAFT":
-      return {
-        background: "#F3F4F6",
-        color: "#374151",
-      };
+      return { background: "#F3F4F6", color: "#374151" };
     case "SENT_FOR_REVIEW":
-      return {
-        background: "#DBEAFE",
-        color: "#1D4ED8",
-      };
+      return { background: "#DBEAFE", color: "#1D4ED8" };
     case "CHANGES_REQUESTED":
-      return {
-        background: "#FEF3C7",
-        color: "#92400E",
-      };
+      return { background: "#FEF3C7", color: "#92400E" };
     case "APPROVED":
-      return {
-        background: "#DCFCE7",
-        color: "#166534",
-      };
+      return { background: "#DCFCE7", color: "#166534" };
     case "REJECTED":
-      return {
-        background: "#FEE2E2",
-        color: "#991B1B",
-      };
+      return { background: "#FEE2E2", color: "#991B1B" };
+    case "DRAFT_ORDER_CREATED":
+      return { background: "#E0E7FF", color: "#3730A3" };
+    case "INVOICE_SENT":
+      return { background: "#FCE7F3", color: "#9D174D" };
+    case "CONVERTED_TO_ORDER":
+      return { background: "#D1FAE5", color: "#065F46" };
     default:
-      return {
-        background: "#F3F4F6",
-        color: "#374151",
-      };
+      return { background: "#F3F4F6", color: "#374151" };
   }
+}
+
+function getHandoffState(approvalCase: {
+  handoffPreparedAt: string | Date | null;
+  shopifyDraftOrderId: string | null;
+  status: string;
+}) {
+  if (approvalCase.shopifyDraftOrderId) return "Draft order created";
+  if (approvalCase.handoffPreparedAt) return "Ready";
+  if (approvalCase.status === "APPROVED") return "Pending";
+  return "Not started";
 }
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
@@ -172,7 +187,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   const caseId = params.caseId;
   if (!caseId) {
@@ -218,10 +233,13 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 
     if (
       approvalCase.status === "APPROVED" ||
-      approvalCase.status === "REJECTED"
+      approvalCase.status === "REJECTED" ||
+      approvalCase.status === "DRAFT_ORDER_CREATED" ||
+      approvalCase.status === "INVOICE_SENT" ||
+      approvalCase.status === "CONVERTED_TO_ORDER"
     ) {
       errors.form =
-        "Revisions cannot be added after a case is approved or rejected.";
+        "Revisions cannot be added after a case is completed or handed off.";
     }
 
     if (Object.keys(errors).length > 0) {
@@ -395,6 +413,174 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     return redirect(`/app/cases/${approvalCase.id}`);
   }
 
+  if (intent === "prepareHandoff") {
+    if (approvalCase.status !== "APPROVED") {
+      return {
+        errors: {
+          form: "Only approved cases can be prepared for Shopify handoff.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    await db.$transaction([
+      db.approvalCase.update({
+        where: { id: approvalCase.id },
+        data: {
+          handoffPreparedAt: new Date(),
+        },
+      }),
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "MERCHANT",
+          actionType: "PREPARE_HANDOFF",
+          note: "Case marked as ready for Shopify handoff",
+        },
+      }),
+    ]);
+
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
+
+  if (intent === "createDraftOrder") {
+    if (approvalCase.status !== "APPROVED") {
+      return {
+        errors: {
+          form: "Only approved cases can create a Shopify draft order.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    if (!approvalCase.handoffPreparedAt) {
+      return {
+        errors: {
+          form: "Prepare the Shopify handoff before creating the draft order.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    if (approvalCase.shopifyDraftOrderId) {
+      return {
+        errors: {
+          form: "A Shopify draft order already exists for this case.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    const input: {
+      note: string;
+      lineItems: Array<{
+        title: string;
+        originalUnitPrice: number;
+        quantity: number;
+        customAttributes: Array<{ key: string; value: string }>;
+      }>;
+      email?: string;
+    } = {
+      note: `Approval case ${approvalCase.externalReference || approvalCase.id}`,
+      lineItems: [
+        {
+          title: approvalCase.title,
+          originalUnitPrice: 0,
+          quantity: 1,
+          customAttributes: [
+            { key: "approval_case_id", value: approvalCase.id },
+            {
+              key: "approval_case_reference",
+              value: approvalCase.externalReference || approvalCase.id,
+            },
+            { key: "approval_status", value: approvalCase.status },
+          ],
+        },
+      ],
+    };
+
+    if (approvalCase.customerEmail) {
+      input.email = approvalCase.customerEmail;
+    }
+
+    const response = await admin.graphql(
+      `#graphql
+        mutation draftOrderCreate($input: DraftOrderInput!) {
+          draftOrderCreate(input: $input) {
+            draftOrder {
+              id
+              name
+              invoiceUrl
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        variables: { input },
+      },
+    );
+
+    const json = (await response.json()) as DraftOrderCreateResponse;
+    const userErrors = json.data?.draftOrderCreate?.userErrors ?? [];
+
+    if (userErrors.length > 0) {
+      return {
+        errors: {
+          form: userErrors.map((error) => error.message).join(" | "),
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    const draftOrder = json.data?.draftOrderCreate?.draftOrder;
+    if (!draftOrder) {
+      return {
+        errors: {
+          form: "Draft order creation returned no draft order.",
+        },
+        values: {
+          summary: "",
+        },
+      } satisfies ActionData;
+    }
+
+    await db.$transaction([
+      db.approvalCase.update({
+        where: { id: approvalCase.id },
+        data: {
+          status: "DRAFT_ORDER_CREATED",
+          shopifyDraftOrderId: draftOrder.id,
+          shopifyDraftOrderName: draftOrder.name,
+          shopifyInvoiceUrl: draftOrder.invoiceUrl ?? null,
+        },
+      }),
+      db.approvalAction.create({
+        data: {
+          approvalCaseId: approvalCase.id,
+          actorType: "SYSTEM",
+          actionType: "CREATE_DRAFT_ORDER",
+          note: `Shopify draft order ${draftOrder.name} created`,
+        },
+      }),
+    ]);
+
+    return redirect(`/app/cases/${approvalCase.id}`);
+  }
+
   throw new Response("Unsupported action", { status: 400 });
 };
 
@@ -414,6 +600,10 @@ export default function ApprovalCaseDetail() {
     navigation.state === "submitting" && currentIntent === "requestChanges";
   const isSubmittingReject =
     navigation.state === "submitting" && currentIntent === "reject";
+  const isSubmittingPrepareHandoff =
+    navigation.state === "submitting" && currentIntent === "prepareHandoff";
+  const isSubmittingCreateDraftOrder =
+    navigation.state === "submitting" && currentIntent === "createDraftOrder";
 
   const status = approvalCase.status as CaseStatus;
   const nextStep = getNextStep(status);
@@ -427,7 +617,16 @@ export default function ApprovalCaseDetail() {
   const canReject = approvalCase.status === "SENT_FOR_REVIEW";
   const canAddRevision =
     approvalCase.status !== "APPROVED" &&
-    approvalCase.status !== "REJECTED";
+    approvalCase.status !== "REJECTED" &&
+    approvalCase.status !== "DRAFT_ORDER_CREATED" &&
+    approvalCase.status !== "INVOICE_SENT" &&
+    approvalCase.status !== "CONVERTED_TO_ORDER";
+  const canPrepareHandoff =
+    approvalCase.status === "APPROVED" && !approvalCase.handoffPreparedAt;
+  const canCreateDraftOrder =
+    approvalCase.status === "APPROVED" &&
+    !!approvalCase.handoffPreparedAt &&
+    !approvalCase.shopifyDraftOrderId;
 
   return (
     <div style={{ display: "grid", gap: "16px" }}>
@@ -510,6 +709,10 @@ export default function ApprovalCaseDetail() {
             {approvalCase.actions[0]
               ? formatLabel(approvalCase.actions[0].actionType)
               : "—"}
+          </div>
+          <div>Shopify handoff: {getHandoffState(approvalCase)}</div>
+          <div>
+            Draft order: {approvalCase.shopifyDraftOrderName || "—"}
           </div>
         </div>
 
@@ -637,6 +840,85 @@ export default function ApprovalCaseDetail() {
             fontWeight: 700,
           }}
         >
+          Shopify handoff
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gap: "6px",
+          }}
+        >
+          <div>State: {getHandoffState(approvalCase)}</div>
+          <div>
+            Prepared at:{" "}
+            {approvalCase.handoffPreparedAt
+              ? new Date(approvalCase.handoffPreparedAt).toLocaleString()
+              : "—"}
+          </div>
+          <div>Draft Order ID: {approvalCase.shopifyDraftOrderId || "—"}</div>
+          <div>Draft Order Name: {approvalCase.shopifyDraftOrderName || "—"}</div>
+          <div>
+            Invoice URL:{" "}
+            {approvalCase.shopifyInvoiceUrl ? (
+              <a
+                href={approvalCase.shopifyInvoiceUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open invoice
+              </a>
+            ) : (
+              "—"
+            )}
+          </div>
+        </div>
+
+        {!approvalCase.shopifyDraftOrderId ? (
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <Form method="post">
+              <input type="hidden" name="intent" value="prepareHandoff" />
+              <button
+                type="submit"
+                disabled={isSubmittingPrepareHandoff || !canPrepareHandoff}
+              >
+                {isSubmittingPrepareHandoff
+                  ? "Preparing..."
+                  : "Mark handoff ready"}
+              </button>
+            </Form>
+
+            <Form method="post">
+              <input type="hidden" name="intent" value="createDraftOrder" />
+              <button
+                type="submit"
+                disabled={isSubmittingCreateDraftOrder || !canCreateDraftOrder}
+              >
+                {isSubmittingCreateDraftOrder
+                  ? "Creating draft order..."
+                  : "Create Draft Order"}
+              </button>
+            </Form>
+          </div>
+        ) : null}
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: "16px",
+          background: "#FFFFFF",
+          padding: "16px",
+          display: "grid",
+          gap: "12px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "14px",
+            fontWeight: 700,
+          }}
+        >
           Audit trail
         </div>
 
@@ -730,7 +1012,7 @@ export default function ApprovalCaseDetail() {
 
             {!canAddRevision ? (
               <p style={{ margin: 0, color: "#6B7280" }}>
-                Revisions are disabled because this case is already completed.
+                Revisions are disabled because this case is already completed or handed off.
               </p>
             ) : null}
           </div>

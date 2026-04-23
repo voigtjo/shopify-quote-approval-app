@@ -4,84 +4,13 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
-
-  const shopInstallation = await db.shopInstallation.upsert({
-    where: { shopDomain: session.shop },
-    update: {},
-    create: {
-      shopDomain: session.shop,
-      appName: "Quote Approval App",
-    },
-  });
-
-  const [
-    totalCases,
-    draftCases,
-    sentForReviewCases,
-    approvedCases,
-    changesRequestedCases,
-    rejectedCases,
-    recentCases,
-  ] = await Promise.all([
-    db.approvalCase.count({
-      where: { shopInstallationId: shopInstallation.id },
-    }),
-    db.approvalCase.count({
-      where: {
-        shopInstallationId: shopInstallation.id,
-        status: "DRAFT",
-      },
-    }),
-    db.approvalCase.count({
-      where: {
-        shopInstallationId: shopInstallation.id,
-        status: "SENT_FOR_REVIEW",
-      },
-    }),
-    db.approvalCase.count({
-      where: {
-        shopInstallationId: shopInstallation.id,
-        status: "APPROVED",
-      },
-    }),
-    db.approvalCase.count({
-      where: {
-        shopInstallationId: shopInstallation.id,
-        status: "CHANGES_REQUESTED",
-      },
-    }),
-    db.approvalCase.count({
-      where: {
-        shopInstallationId: shopInstallation.id,
-        status: "REJECTED",
-      },
-    }),
-    db.approvalCase.findMany({
-      where: { shopInstallationId: shopInstallation.id },
-      orderBy: { updatedAt: "desc" },
-      take: 10,
-      include: {
-        actions: {
-          orderBy: { createdAt: "desc" },
-          take: 1,
-        },
-      },
-    }),
-  ]);
-
-  return {
-    shopDomain: session.shop,
-    totalCases,
-    draftCases,
-    sentForReviewCases,
-    approvedCases,
-    changesRequestedCases,
-    rejectedCases,
-    recentCases,
-  };
-};
+function formatLabel(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 function StatTile({
   label,
@@ -122,6 +51,121 @@ function StatTile({
   );
 }
 
+function getHandoffState(caseItem: {
+  handoffPreparedAt: string | Date | null;
+  shopifyDraftOrderId: string | null;
+  status: string;
+}) {
+  if (caseItem.shopifyDraftOrderId) return "Draft order created";
+  if (caseItem.handoffPreparedAt) return "Ready";
+  if (caseItem.status === "APPROVED") return "Pending";
+  return "—";
+}
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+
+  const shopInstallation = await db.shopInstallation.upsert({
+    where: { shopDomain: session.shop },
+    update: {},
+    create: {
+      shopDomain: session.shop,
+      appName: "Quote Approval App",
+    },
+  });
+
+  const [
+    totalCases,
+    draftCases,
+    sentForReviewCases,
+    approvedCases,
+    changesRequestedCases,
+    rejectedCases,
+    handoffReadyCases,
+    draftOrderCreatedCases,
+    invoiceSentCases,
+    recentCases,
+  ] = await Promise.all([
+    db.approvalCase.count({
+      where: { shopInstallationId: shopInstallation.id },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        status: "DRAFT",
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        status: "SENT_FOR_REVIEW",
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        status: "APPROVED",
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        status: "CHANGES_REQUESTED",
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        status: "REJECTED",
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        handoffPreparedAt: { not: null },
+        shopifyDraftOrderId: null,
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        shopifyDraftOrderId: { not: null },
+      },
+    }),
+    db.approvalCase.count({
+      where: {
+        shopInstallationId: shopInstallation.id,
+        status: "INVOICE_SENT",
+      },
+    }),
+    db.approvalCase.findMany({
+      where: { shopInstallationId: shopInstallation.id },
+      orderBy: { updatedAt: "desc" },
+      take: 10,
+      include: {
+        actions: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
+      },
+    }),
+  ]);
+
+  return {
+    shopDomain: session.shop,
+    totalCases,
+    draftCases,
+    sentForReviewCases,
+    approvedCases,
+    changesRequestedCases,
+    rejectedCases,
+    handoffReadyCases,
+    draftOrderCreatedCases,
+    invoiceSentCases,
+    recentCases,
+  };
+};
+
 export default function Index() {
   const {
     shopDomain,
@@ -131,6 +175,9 @@ export default function Index() {
     approvedCases,
     changesRequestedCases,
     rejectedCases,
+    handoffReadyCases,
+    draftOrderCreatedCases,
+    invoiceSentCases,
     recentCases,
   } = useLoaderData<typeof loader>();
 
@@ -185,6 +232,30 @@ export default function Index() {
             <StatTile label="Rejected" value={rejectedCases} />
           </div>
         </div>
+
+        <div>
+          <div
+            style={{
+              fontSize: "12px",
+              color: "#6B7280",
+              marginBottom: "8px",
+            }}
+          >
+            Shopify handoff
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
+              gap: "8px",
+            }}
+          >
+            <StatTile label="Ready" value={handoffReadyCases} />
+            <StatTile label="Draft orders" value={draftOrderCreatedCases} />
+            <StatTile label="Invoice sent" value={invoiceSentCases} />
+          </div>
+        </div>
       </div>
 
       <div
@@ -214,15 +285,16 @@ export default function Index() {
               style={{
                 width: "100%",
                 borderCollapse: "collapse",
-                minWidth: "640px",
+                minWidth: "760px",
               }}
             >
               <thead>
                 <tr>
                   <th style={thStyle}>Case</th>
                   <th style={thStyle}>Status</th>
-                  <th style={thStyle}>Customer</th>
                   <th style={thStyle}>Last action</th>
+                  <th style={thStyle}>Handoff</th>
+                  <th style={thStyle}>Draft order</th>
                   <th style={thStyle}>Updated</th>
                   <th style={thStyle}></th>
                 </tr>
@@ -231,11 +303,14 @@ export default function Index() {
                 {recentCases.map((approvalCase) => (
                   <tr key={approvalCase.id}>
                     <td style={tdStyleStrong}>{approvalCase.title}</td>
-                    <td style={tdStyle}>{approvalCase.status}</td>
-                    <td style={tdStyle}>{approvalCase.customerName || "—"}</td>
+                    <td style={tdStyle}>{formatLabel(approvalCase.status)}</td>
                     <td style={tdStyle}>
-                      {approvalCase.actions[0]?.actionType ?? "—"}
+                      {approvalCase.actions[0]
+                        ? formatLabel(approvalCase.actions[0].actionType)
+                        : "—"}
                     </td>
+                    <td style={tdStyle}>{getHandoffState(approvalCase)}</td>
+                    <td style={tdStyle}>{approvalCase.shopifyDraftOrderName || "—"}</td>
                     <td style={tdStyle}>
                       {new Date(approvalCase.updatedAt).toLocaleString()}
                     </td>

@@ -22,16 +22,14 @@ function getNextStepShort(status: string) {
       return "Revise and resend";
     case "APPROVED":
       return "Prepare handoff";
-    case "REJECTED":
-      return "Closed";
-    case "EXPIRED":
-      return "Review";
     case "DRAFT_ORDER_CREATED":
       return "Continue in Shopify";
     case "INVOICE_SENT":
       return "Wait for payment";
     case "CONVERTED_TO_ORDER":
       return "Completed";
+    case "REJECTED":
+      return "Closed";
     default:
       return "Review";
   }
@@ -40,36 +38,35 @@ function getNextStepShort(status: string) {
 function getStatusBadgeStyle(status: string): React.CSSProperties {
   switch (status) {
     case "DRAFT":
-      return {
-        background: "#F3F4F6",
-        color: "#374151",
-      };
+      return { background: "#F3F4F6", color: "#374151" };
     case "SENT_FOR_REVIEW":
-      return {
-        background: "#DBEAFE",
-        color: "#1D4ED8",
-      };
+      return { background: "#DBEAFE", color: "#1D4ED8" };
     case "CHANGES_REQUESTED":
-      return {
-        background: "#FEF3C7",
-        color: "#92400E",
-      };
+      return { background: "#FEF3C7", color: "#92400E" };
     case "APPROVED":
-      return {
-        background: "#DCFCE7",
-        color: "#166534",
-      };
+      return { background: "#DCFCE7", color: "#166534" };
     case "REJECTED":
-      return {
-        background: "#FEE2E2",
-        color: "#991B1B",
-      };
+      return { background: "#FEE2E2", color: "#991B1B" };
+    case "DRAFT_ORDER_CREATED":
+      return { background: "#E0E7FF", color: "#3730A3" };
+    case "INVOICE_SENT":
+      return { background: "#FCE7F3", color: "#9D174D" };
+    case "CONVERTED_TO_ORDER":
+      return { background: "#D1FAE5", color: "#065F46" };
     default:
-      return {
-        background: "#F3F4F6",
-        color: "#374151",
-      };
+      return { background: "#F3F4F6", color: "#374151" };
   }
+}
+
+function getHandoffState(caseItem: {
+  handoffPreparedAt: string | Date | null;
+  shopifyDraftOrderId: string | null;
+  status: string;
+}) {
+  if (caseItem.shopifyDraftOrderId) return "Draft order created";
+  if (caseItem.handoffPreparedAt) return "Ready";
+  if (caseItem.status === "APPROVED") return "Pending";
+  return "—";
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -118,33 +115,23 @@ export default function CasesIndexPage() {
         gap: "12px",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: "12px",
-          flexWrap: "wrap",
-        }}
-      >
-        <div>
-          <div
-            style={{
-              fontSize: "18px",
-              fontWeight: 700,
-              marginBottom: "4px",
-            }}
-          >
-            All approval cases
-          </div>
-          <div
-            style={{
-              fontSize: "13px",
-              color: "#6B7280",
-            }}
-          >
-            Open a case to continue the workflow, review the status, and inspect the audit trail.
-          </div>
+      <div>
+        <div
+          style={{
+            fontSize: "18px",
+            fontWeight: 700,
+            marginBottom: "4px",
+          }}
+        >
+          All approval cases
+        </div>
+        <div
+          style={{
+            fontSize: "13px",
+            color: "#6B7280",
+          }}
+        >
+          Open a case to continue the workflow, inspect the audit trail, or continue the Shopify handoff.
         </div>
       </div>
 
@@ -156,7 +143,7 @@ export default function CasesIndexPage() {
             style={{
               width: "100%",
               borderCollapse: "collapse",
-              minWidth: "980px",
+              minWidth: "1080px",
             }}
           >
             <thead>
@@ -167,6 +154,8 @@ export default function CasesIndexPage() {
                 <th style={thStyle}>Revision</th>
                 <th style={thStyle}>Last action</th>
                 <th style={thStyle}>Next step</th>
+                <th style={thStyle}>Handoff</th>
+                <th style={thStyle}>Draft order</th>
                 <th style={thStyle}>Updated</th>
                 <th style={thStyle}></th>
               </tr>
@@ -201,6 +190,8 @@ export default function CasesIndexPage() {
                       : "—"}
                   </td>
                   <td style={tdStyle}>{getNextStepShort(approvalCase.status)}</td>
+                  <td style={tdStyle}>{getHandoffState(approvalCase)}</td>
+                  <td style={tdStyle}>{approvalCase.shopifyDraftOrderName || "—"}</td>
                   <td style={tdStyle}>
                     {new Date(approvalCase.updatedAt).toLocaleString()}
                   </td>

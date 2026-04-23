@@ -37,17 +37,21 @@ model ShopInstallation {
 }
 
 model ApprovalCase {
-  id                 String             @id @default(cuid())
-  shopInstallationId String
-  externalReference  String?
-  title              String
-  customerName       String?
-  customerEmail      String?
-  status             ApprovalCaseStatus @default(DRAFT)
-  currencyCode       String             @default("USD")
-  expiresAt          DateTime?
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  id                    String             @id @default(cuid())
+  shopInstallationId    String
+  externalReference     String?
+  title                 String
+  customerName          String?
+  customerEmail         String?
+  status                ApprovalCaseStatus @default(DRAFT)
+  currencyCode          String             @default("USD")
+  expiresAt             DateTime?
+  shopifyDraftOrderId   String?            @unique
+  shopifyDraftOrderName String?
+  shopifyInvoiceUrl     String?
+  handoffPreparedAt     DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
 
   shopInstallation ShopInstallation   @relation(fields: [shopInstallationId], references: [id], onDelete: Cascade)
   revisions        ApprovalRevision[]
@@ -104,6 +108,7 @@ enum ApprovalActionType {
   APPROVE
   REJECT
   EXPIRE
+  PREPARE_HANDOFF
   CREATE_DRAFT_ORDER
   SEND_INVOICE
 }

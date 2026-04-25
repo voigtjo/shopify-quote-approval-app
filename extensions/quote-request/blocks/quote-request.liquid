@@ -1,0 +1,66 @@
+{% schema %}
+{
+  "name": "Quote request form",
+  "target": "section",
+  "templates": ["product"],
+  "settings": []
+}
+{% endschema %}
+
+<div class="quote-request-block" id="quote-request-block-{{ block.id }}">
+  <div style="border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-top: 24px;">
+    <h3 style="margin-top: 0;">Angebot anfragen</h3>
+    <p>Für dieses Produkt eine Anfrage an das Backoffice senden.</p>
+
+    <form
+        id="quote-request-form-{{ block.id }}"
+        method="post"
+        action="/apps/quote-request"
+    >
+      <input type="hidden" name="productTitle" value="{{ product.title | escape }}">
+      <input type="hidden" name="productHandle" value="{{ product.handle | escape }}">
+      <input type="hidden" name="storefrontUrl" value="{{ shop.url }}{{ product.url }}">
+
+      <div style="margin-bottom: 12px;">
+        <label for="customerName-{{ block.id }}">Name</label><br>
+        <input
+          id="customerName-{{ block.id }}"
+          name="customerName"
+          type="text"
+          value="{% if customer %}{{ customer.first_name }} {{ customer.last_name }}{% endif %}"
+          style="width: 100%; padding: 10px;"
+        >
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label for="customerEmail-{{ block.id }}">E-Mail</label><br>
+        <input
+          id="customerEmail-{{ block.id }}"
+          name="customerEmail"
+          type="email"
+          value="{% if customer %}{{ customer.email }}{% endif %}"
+          style="width: 100%; padding: 10px;"
+          required
+        >
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label for="requestText-{{ block.id }}">Anforderung</label><br>
+        <textarea
+          id="requestText-{{ block.id }}"
+          name="requestText"
+          rows="5"
+          style="width: 100%; padding: 10px;"
+          placeholder="Beschreibe kurz, wofür du ein Angebot brauchst."
+          required
+        ></textarea>
+      </div>
+
+      <button type="submit" style="padding: 10px 16px; cursor: pointer;">
+        Anfrage senden
+      </button>
+    </form>
+
+    <div id="quote-request-result-{{ block.id }}" style="margin-top: 12px;"></div>
+  </div>
+</div>

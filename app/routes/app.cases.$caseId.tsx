@@ -10,10 +10,13 @@ import {
   useActionData,
   useLoaderData,
   useNavigation,
+  useRouteError,
+  isRouteErrorResponse,
 } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { logServerError, logServerInfo } from "../lib/log.server";
 
 type ActionErrors = {
   summary?: string;
@@ -147,441 +150,492 @@ function getHandoffState(approvalCase: {
 }
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
-
   const caseId = params.caseId;
-  if (!caseId) {
-    throw new Response("Case ID is required", { status: 400 });
-  }
 
-  const shopInstallation = await db.shopInstallation.findUnique({
-    where: { shopDomain: session.shop },
-  });
+  try {
+    const { session } = await authenticate.admin(request);
 
-  if (!shopInstallation) {
-    throw new Response("Shop installation not found", { status: 404 });
-  }
+    if (!caseId) {
+      throw new Response("Case ID is required.", { status: 400 });
+    }
 
-  const approvalCase = await db.approvalCase.findFirst({
-    where: {
-      id: caseId,
-      shopInstallationId: shopInstallation.id,
-    },
-    include: {
-      revisions: {
-        orderBy: { revisionNumber: "desc" },
+    const shopInstallation = await db.shopInstallation.findUnique({
+      where: { shopDomain: session.shop },
+    });
+
+    if (!shopInstallation) {
+      throw new Response("Shop installation not found.", { status: 404 });
+    }
+
+    const approvalCase = await db.approvalCase.findFirst({
+      where: {
+        id: caseId,
+        shopInstallationId: shopInstallation.id,
       },
-      actions: {
-        orderBy: { createdAt: "desc" },
+      include: {
+        revisions: {
+          orderBy: { revisionNumber: "desc" },
+        },
+        actions: {
+          orderBy: { createdAt: "desc" },
+        },
       },
-    },
-  });
+    });
 
-  if (!approvalCase) {
-    throw new Response("Approval case not found", { status: 404 });
+    if (!approvalCase) {
+      throw new Response("Approval case not found.", { status: 404 });
+    }
+
+    return {
+      approvalCase,
+    };
+  } catch (error) {
+    if (error instanceof Response) throw error;
+
+    logServerError("Failed to load approval case", error, {
+      route: "app.cases.$caseId",
+      caseId,
+    });
+
+    throw new Response("The approval case could not be loaded.", {
+      status: 500,
+    });
   }
-
-  return {
-    approvalCase,
-  };
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-
   const caseId = params.caseId;
-  if (!caseId) {
-    throw new Response("Case ID is required", { status: 400 });
-  }
+  let intent = "";
+  let summary = "";
 
-  const formData = await request.formData();
-  const intent = String(formData.get("intent") || "");
+  try {
+    const { admin, session } = await authenticate.admin(request);
 
-  const shopInstallation = await db.shopInstallation.findUnique({
-    where: { shopDomain: session.shop },
-  });
+    if (!caseId) {
+      throw new Response("Case ID is required.", { status: 400 });
+    }
 
-  if (!shopInstallation) {
-    throw new Response("Shop installation not found", { status: 404 });
-  }
+    const formData = await request.formData();
+    intent = String(formData.get("intent") || "");
+    summary = String(formData.get("summary") || "").trim();
 
-  const approvalCase = await db.approvalCase.findFirst({
-    where: {
-      id: caseId,
-      shopInstallationId: shopInstallation.id,
-    },
-    include: {
-      revisions: {
-        orderBy: { revisionNumber: "desc" },
-        take: 1,
+    const shopInstallation = await db.shopInstallation.findUnique({
+      where: { shopDomain: session.shop },
+    });
+
+    if (!shopInstallation) {
+      throw new Response("Shop installation not found.", { status: 404 });
+    }
+
+    const approvalCase = await db.approvalCase.findFirst({
+      where: {
+        id: caseId,
+        shopInstallationId: shopInstallation.id,
       },
-    },
-  });
-
-  if (!approvalCase) {
-    throw new Response("Approval case not found", { status: 404 });
-  }
-
-  if (intent === "addRevision") {
-    const summary = String(formData.get("summary") || "").trim();
-
-    const errors: ActionErrors = {};
-
-    if (!summary) {
-      errors.summary = "Revision summary is required.";
-    }
-
-    if (
-      approvalCase.status === "APPROVED" ||
-      approvalCase.status === "REJECTED" ||
-      approvalCase.status === "DRAFT_ORDER_CREATED" ||
-      approvalCase.status === "INVOICE_SENT" ||
-      approvalCase.status === "CONVERTED_TO_ORDER"
-    ) {
-      errors.form =
-        "Revisions cannot be added after a case is completed or handed off.";
-    }
-
-    if (Object.keys(errors).length > 0) {
-      return {
-        errors,
-        values: {
-          summary,
+      include: {
+        revisions: {
+          orderBy: { revisionNumber: "desc" },
+          take: 1,
         },
-      } satisfies ActionData;
+      },
+    });
+
+    if (!approvalCase) {
+      throw new Response("Approval case not found.", { status: 404 });
     }
 
-    const nextRevisionNumber =
-      (approvalCase.revisions[0]?.revisionNumber ?? 0) + 1;
+    if (intent === "addRevision") {
+      const errors: ActionErrors = {};
 
-    await db.$transaction([
-      db.approvalRevision.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          revisionNumber: nextRevisionNumber,
-          summary,
-          payloadJson: JSON.stringify({
+      if (!summary) {
+        errors.summary = "Revision summary is required.";
+      }
+
+      if (
+        approvalCase.status === "APPROVED" ||
+        approvalCase.status === "REJECTED" ||
+        approvalCase.status === "DRAFT_ORDER_CREATED" ||
+        approvalCase.status === "INVOICE_SENT" ||
+        approvalCase.status === "CONVERTED_TO_ORDER"
+      ) {
+        errors.form =
+          "Revisions cannot be added after a case is completed or handed off.";
+      }
+
+      if (Object.keys(errors).length > 0) {
+        return {
+          errors,
+          values: { summary },
+        } satisfies ActionData;
+      }
+
+      const nextRevisionNumber =
+        (approvalCase.revisions[0]?.revisionNumber ?? 0) + 1;
+
+      await db.$transaction([
+        db.approvalRevision.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            revisionNumber: nextRevisionNumber,
             summary,
-            createdFrom: "case-detail-form",
-          }),
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "MERCHANT",
-          actionType: "ADD_REVISION",
-          note: `Revision ${nextRevisionNumber} added from case detail page`,
-        },
-      }),
-    ]);
+            payloadJson: JSON.stringify({
+              summary,
+              createdFrom: "case-detail-form",
+            }),
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "MERCHANT",
+            actionType: "ADD_REVISION",
+            note: `Revision ${nextRevisionNumber} added from case detail page`,
+          },
+        }),
+      ]);
 
-    return redirect(`/app/cases/${approvalCase.id}`);
-  }
+      logServerInfo("Revision added", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+        revisionNumber: nextRevisionNumber,
+      });
 
-  if (intent === "sendForReview") {
-    if (
-      approvalCase.status !== "DRAFT" &&
-      approvalCase.status !== "CHANGES_REQUESTED"
-    ) {
-      return {
-        errors: {
-          form: "Only draft cases or cases with requested changes can be sent for review.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
+      return redirect(`/app/cases/${approvalCase.id}`);
     }
 
-    await db.$transaction([
-      db.approvalCase.update({
-        where: { id: approvalCase.id },
-        data: {
-          status: "SENT_FOR_REVIEW",
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "MERCHANT",
-          actionType: "SEND_FOR_REVIEW",
-          note:
-            approvalCase.status === "CHANGES_REQUESTED"
-              ? "Case updated and sent for review again"
-              : "Case sent for review from case detail page",
-        },
-      }),
-    ]);
+    if (intent === "sendForReview") {
+      if (
+        approvalCase.status !== "DRAFT" &&
+        approvalCase.status !== "CHANGES_REQUESTED"
+      ) {
+        return {
+          errors: {
+            form: "Only draft cases or cases with requested changes can be sent for review.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    return redirect(`/app/cases/${approvalCase.id}`);
-  }
+      await db.$transaction([
+        db.approvalCase.update({
+          where: { id: approvalCase.id },
+          data: {
+            status: "SENT_FOR_REVIEW",
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "MERCHANT",
+            actionType: "SEND_FOR_REVIEW",
+            note:
+              approvalCase.status === "CHANGES_REQUESTED"
+                ? "Case updated and sent for review again"
+                : "Case sent for review from case detail page",
+          },
+        }),
+      ]);
 
-  if (intent === "approve") {
-    if (approvalCase.status !== "SENT_FOR_REVIEW") {
-      return {
-        errors: {
-          form: "Only cases in SENT_FOR_REVIEW can be approved.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
+      logServerInfo("Case sent for review", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+      });
+
+      return redirect(`/app/cases/${approvalCase.id}`);
     }
 
-    await db.$transaction([
-      db.approvalCase.update({
-        where: { id: approvalCase.id },
-        data: {
-          status: "APPROVED",
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "MERCHANT",
-          actionType: "APPROVE",
-          note: "Case approved from case detail page",
-        },
-      }),
-    ]);
+    if (intent === "approve") {
+      if (approvalCase.status !== "SENT_FOR_REVIEW") {
+        return {
+          errors: {
+            form: "Only cases in SENT_FOR_REVIEW can be approved.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    return redirect(`/app/cases/${approvalCase.id}`);
-  }
+      await db.$transaction([
+        db.approvalCase.update({
+          where: { id: approvalCase.id },
+          data: {
+            status: "APPROVED",
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "MERCHANT",
+            actionType: "APPROVE",
+            note: "Case approved from case detail page",
+          },
+        }),
+      ]);
 
-  if (intent === "requestChanges") {
-    if (approvalCase.status !== "SENT_FOR_REVIEW") {
-      return {
-        errors: {
-          form: "Only cases in SENT_FOR_REVIEW can request changes.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
+      logServerInfo("Case approved", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+      });
+
+      return redirect(`/app/cases/${approvalCase.id}`);
     }
 
-    await db.$transaction([
-      db.approvalCase.update({
-        where: { id: approvalCase.id },
-        data: {
-          status: "CHANGES_REQUESTED",
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "MERCHANT",
-          actionType: "REQUEST_CHANGES",
-          note: "Changes requested from case detail page",
-        },
-      }),
-    ]);
+    if (intent === "requestChanges") {
+      if (approvalCase.status !== "SENT_FOR_REVIEW") {
+        return {
+          errors: {
+            form: "Only cases in SENT_FOR_REVIEW can request changes.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    return redirect(`/app/cases/${approvalCase.id}`);
-  }
+      await db.$transaction([
+        db.approvalCase.update({
+          where: { id: approvalCase.id },
+          data: {
+            status: "CHANGES_REQUESTED",
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "MERCHANT",
+            actionType: "REQUEST_CHANGES",
+            note: "Changes requested from case detail page",
+          },
+        }),
+      ]);
 
-  if (intent === "reject") {
-    if (approvalCase.status !== "SENT_FOR_REVIEW") {
-      return {
-        errors: {
-          form: "Only cases in SENT_FOR_REVIEW can be rejected.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
+      logServerInfo("Changes requested", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+      });
+
+      return redirect(`/app/cases/${approvalCase.id}`);
     }
 
-    await db.$transaction([
-      db.approvalCase.update({
-        where: { id: approvalCase.id },
-        data: {
-          status: "REJECTED",
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "MERCHANT",
-          actionType: "REJECT",
-          note: "Case rejected from case detail page",
-        },
-      }),
-    ]);
+    if (intent === "reject") {
+      if (approvalCase.status !== "SENT_FOR_REVIEW") {
+        return {
+          errors: {
+            form: "Only cases in SENT_FOR_REVIEW can be rejected.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    return redirect(`/app/cases/${approvalCase.id}`);
-  }
+      await db.$transaction([
+        db.approvalCase.update({
+          where: { id: approvalCase.id },
+          data: {
+            status: "REJECTED",
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "MERCHANT",
+            actionType: "REJECT",
+            note: "Case rejected from case detail page",
+          },
+        }),
+      ]);
 
-  if (intent === "prepareHandoff") {
-    if (approvalCase.status !== "APPROVED") {
-      return {
-        errors: {
-          form: "Only approved cases can be prepared for Shopify handoff.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
+      logServerInfo("Case rejected", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+      });
+
+      return redirect(`/app/cases/${approvalCase.id}`);
     }
 
-    await db.$transaction([
-      db.approvalCase.update({
-        where: { id: approvalCase.id },
-        data: {
-          handoffPreparedAt: new Date(),
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "MERCHANT",
-          actionType: "PREPARE_HANDOFF",
-          note: "Case marked as ready for Shopify handoff",
-        },
-      }),
-    ]);
+    if (intent === "prepareHandoff") {
+      if (approvalCase.status !== "APPROVED") {
+        return {
+          errors: {
+            form: "Only approved cases can be prepared for Shopify handoff.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    return redirect(`/app/cases/${approvalCase.id}`);
-  }
+      await db.$transaction([
+        db.approvalCase.update({
+          where: { id: approvalCase.id },
+          data: {
+            handoffPreparedAt: new Date(),
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "MERCHANT",
+            actionType: "PREPARE_HANDOFF",
+            note: "Case marked as ready for Shopify handoff",
+          },
+        }),
+      ]);
 
-  if (intent === "createDraftOrder") {
-    if (approvalCase.status !== "APPROVED") {
-      return {
-        errors: {
-          form: "Only approved cases can create a Shopify draft order.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
+      logServerInfo("Shopify handoff prepared", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+      });
+
+      return redirect(`/app/cases/${approvalCase.id}`);
     }
 
-    if (!approvalCase.handoffPreparedAt) {
-      return {
-        errors: {
-          form: "Prepare the Shopify handoff before creating the draft order.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
-    }
+    if (intent === "createDraftOrder") {
+      if (approvalCase.status !== "APPROVED") {
+        return {
+          errors: {
+            form: "Only approved cases can create a Shopify draft order.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    if (approvalCase.shopifyDraftOrderId) {
-      return {
-        errors: {
-          form: "A Shopify draft order already exists for this case.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
-    }
+      if (!approvalCase.handoffPreparedAt) {
+        return {
+          errors: {
+            form: "Prepare the Shopify handoff before creating the draft order.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    const input: {
-      note: string;
-      lineItems: Array<{
-        title: string;
-        originalUnitPrice: number;
-        quantity: number;
-        customAttributes: Array<{ key: string; value: string }>;
-      }>;
-      email?: string;
-    } = {
-      note: `Approval case ${approvalCase.externalReference || approvalCase.id}`,
-      lineItems: [
-        {
-          title: approvalCase.title,
-          originalUnitPrice: 0,
-          quantity: 1,
-          customAttributes: [
-            { key: "approval_case_id", value: approvalCase.id },
-            {
-              key: "approval_case_reference",
-              value: approvalCase.externalReference || approvalCase.id,
-            },
-            { key: "approval_status", value: approvalCase.status },
-          ],
-        },
-      ],
-    };
+      if (approvalCase.shopifyDraftOrderId) {
+        return {
+          errors: {
+            form: "A Shopify draft order already exists for this case.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
 
-    if (approvalCase.customerEmail) {
-      input.email = approvalCase.customerEmail;
-    }
+      const input: {
+        note: string;
+        lineItems: Array<{
+          title: string;
+          originalUnitPrice: number;
+          quantity: number;
+          customAttributes: Array<{ key: string; value: string }>;
+        }>;
+        email?: string;
+      } = {
+        note: `Approval case ${approvalCase.externalReference || approvalCase.id}`,
+        lineItems: [
+          {
+            title: approvalCase.title,
+            originalUnitPrice: 0,
+            quantity: 1,
+            customAttributes: [
+              { key: "approval_case_id", value: approvalCase.id },
+              {
+                key: "approval_case_reference",
+                value: approvalCase.externalReference || approvalCase.id,
+              },
+              { key: "approval_status", value: approvalCase.status },
+            ],
+          },
+        ],
+      };
 
-    const response = await admin.graphql(
-      `#graphql
-        mutation draftOrderCreate($input: DraftOrderInput!) {
-          draftOrderCreate(input: $input) {
-            draftOrder {
-              id
-              name
-              invoiceUrl
-            }
-            userErrors {
-              field
-              message
+      if (approvalCase.customerEmail) {
+        input.email = approvalCase.customerEmail;
+      }
+
+      const response = await admin.graphql(
+        `#graphql
+          mutation draftOrderCreate($input: DraftOrderInput!) {
+            draftOrderCreate(input: $input) {
+              draftOrder {
+                id
+                name
+                invoiceUrl
+              }
+              userErrors {
+                field
+                message
+              }
             }
           }
-        }
-      `,
-      {
-        variables: { input },
+        `,
+        {
+          variables: { input },
+        },
+      );
+
+      const json = (await response.json()) as DraftOrderCreateResponse;
+      const userErrors = json.data?.draftOrderCreate?.userErrors ?? [];
+
+      if (userErrors.length > 0) {
+        return {
+          errors: {
+            form: userErrors.map((error) => error.message).join(" | "),
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
+      const draftOrder = json.data?.draftOrderCreate?.draftOrder;
+      if (!draftOrder) {
+        return {
+          errors: {
+            form: "Draft order creation returned no draft order.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
+      await db.$transaction([
+        db.approvalCase.update({
+          where: { id: approvalCase.id },
+          data: {
+            status: "DRAFT_ORDER_CREATED",
+            shopifyDraftOrderId: draftOrder.id,
+            shopifyDraftOrderName: draftOrder.name,
+            shopifyInvoiceUrl: draftOrder.invoiceUrl ?? null,
+          },
+        }),
+        db.approvalAction.create({
+          data: {
+            approvalCaseId: approvalCase.id,
+            actorType: "SYSTEM",
+            actionType: "CREATE_DRAFT_ORDER",
+            note: `Shopify draft order ${draftOrder.name} created`,
+          },
+        }),
+      ]);
+
+      logServerInfo("Draft order created", {
+        route: "app.cases.$caseId",
+        caseId: approvalCase.id,
+        draftOrderId: draftOrder.id,
+        draftOrderName: draftOrder.name,
+      });
+
+      return redirect(`/app/cases/${approvalCase.id}`);
+    }
+
+    throw new Response("Unsupported action.", { status: 400 });
+  } catch (error) {
+    if (error instanceof Response) throw error;
+
+    logServerError("Approval case action failed", error, {
+      route: "app.cases.$caseId",
+      caseId,
+      intent,
+    });
+
+    return {
+      errors: {
+        form: "Something went wrong while processing the action. Please try again.",
       },
-    );
-
-    const json = (await response.json()) as DraftOrderCreateResponse;
-    const userErrors = json.data?.draftOrderCreate?.userErrors ?? [];
-
-    if (userErrors.length > 0) {
-      return {
-        errors: {
-          form: userErrors.map((error) => error.message).join(" | "),
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
-    }
-
-    const draftOrder = json.data?.draftOrderCreate?.draftOrder;
-    if (!draftOrder) {
-      return {
-        errors: {
-          form: "Draft order creation returned no draft order.",
-        },
-        values: {
-          summary: "",
-        },
-      } satisfies ActionData;
-    }
-
-    await db.$transaction([
-      db.approvalCase.update({
-        where: { id: approvalCase.id },
-        data: {
-          status: "DRAFT_ORDER_CREATED",
-          shopifyDraftOrderId: draftOrder.id,
-          shopifyDraftOrderName: draftOrder.name,
-          shopifyInvoiceUrl: draftOrder.invoiceUrl ?? null,
-        },
-      }),
-      db.approvalAction.create({
-        data: {
-          approvalCaseId: approvalCase.id,
-          actorType: "SYSTEM",
-          actionType: "CREATE_DRAFT_ORDER",
-          note: `Shopify draft order ${draftOrder.name} created`,
-        },
-      }),
-    ]);
-
-    return redirect(`/app/cases/${approvalCase.id}`);
+      values: {
+        summary,
+      },
+    } satisfies ActionData;
   }
-
-  throw new Response("Unsupported action", { status: 400 });
 };
 
 export default function ApprovalCaseDetail() {
@@ -711,9 +765,7 @@ export default function ApprovalCaseDetail() {
               : "—"}
           </div>
           <div>Shopify handoff: {getHandoffState(approvalCase)}</div>
-          <div>
-            Draft order: {approvalCase.shopifyDraftOrderName || "—"}
-          </div>
+          <div>Draft order: {approvalCase.shopifyDraftOrderName || "—"}</div>
         </div>
 
         <div
@@ -1063,6 +1115,40 @@ export default function ApprovalCaseDetail() {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  let title = "Case unavailable";
+  let message = "The case page could not be loaded.";
+
+  if (isRouteErrorResponse(error)) {
+    title = `Request failed (${error.status})`;
+    message =
+      typeof error.data === "string"
+        ? error.data
+        : "The case page could not be loaded.";
+  }
+
+  return (
+    <div
+      style={{
+        border: "1px solid #FECACA",
+        borderRadius: "16px",
+        background: "#FEF2F2",
+        padding: "16px",
+        display: "grid",
+        gap: "12px",
+      }}
+    >
+      <div style={{ fontSize: "18px", fontWeight: 700 }}>{title}</div>
+      <div>{message}</div>
+      <div>
+        <Link to="/app/cases">← Back to cases</Link>
       </div>
     </div>
   );

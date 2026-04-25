@@ -9,14 +9,18 @@ import {
   redirect,
   useActionData,
   useNavigation,
+  useRouteError,
+  isRouteErrorResponse,
 } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { logServerError, logServerInfo } from "../lib/log.server";
 
 type ActionErrors = {
   title?: string;
   customerEmail?: string;
+  form?: string;
 };
 
 type ActionData = {
@@ -34,27 +38,102 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  let title = "";
+  let customerName = "";
+  let customerEmail = "";
 
-  const formData = await request.formData();
+  try {
+    const { session } = await authenticate.admin(request);
 
-  const title = String(formData.get("title") || "").trim();
-  const customerName = String(formData.get("customerName") || "").trim();
-  const customerEmail = String(formData.get("customerEmail") || "").trim();
+    const formData = await request.formData();
 
-  const errors: ActionErrors = {};
+    title = String(formData.get("title") || "").trim();
+    customerName = String(formData.get("customerName") || "").trim();
+    customerEmail = String(formData.get("customerEmail") || "").trim();
 
-  if (!title) {
-    errors.title = "Title is required.";
-  }
+    const errors: ActionErrors = {};
 
-  if (customerEmail && !customerEmail.includes("@")) {
-    errors.customerEmail = "Customer email must look like an email address.";
-  }
+    if (!title) {
+      errors.title = "Title is required.";
+    }
 
-  if (Object.keys(errors).length > 0) {
+    if (customerEmail && !customerEmail.includes("@")) {
+      errors.customerEmail = "Customer email must look like an email address.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return {
+        errors,
+        values: {
+          title,
+          customerName,
+          customerEmail,
+        },
+      } satisfies ActionData;
+    }
+
+    const shopInstallation = await db.shopInstallation.upsert({
+      where: { shopDomain: session.shop },
+      update: {},
+      create: {
+        shopDomain: session.shop,
+        appName: "Quote Approval App",
+      },
+    });
+
+    const existingCount = await db.approvalCase.count({
+      where: { shopInstallationId: shopInstallation.id },
+    });
+
+    const newCase = await db.approvalCase.create({
+      data: {
+        shopInstallationId: shopInstallation.id,
+        externalReference: `CASE-${existingCount + 1}`,
+        title,
+        customerName: customerName || null,
+        customerEmail: customerEmail || null,
+        currencyCode: "USD",
+        revisions: {
+          create: {
+            revisionNumber: 1,
+            summary: "Initial merchant-created revision",
+            payloadJson: JSON.stringify({
+              title,
+              customerName,
+              customerEmail,
+              createdFrom: "new-case-page",
+            }),
+          },
+        },
+        actions: {
+          create: {
+            actorType: "MERCHANT",
+            actionType: "CREATE_CASE",
+            note: "Approval case created from new case page",
+          },
+        },
+      },
+    });
+
+    logServerInfo("Approval case created", {
+      route: "app.cases.new",
+      caseId: newCase.id,
+      shop: session.shop,
+      title,
+    });
+
+    return redirect(`/app/cases/${newCase.id}`);
+  } catch (error) {
+    logServerError("Failed to create approval case", error, {
+      route: "app.cases.new",
+      title,
+      customerEmail,
+    });
+
     return {
-      errors,
+      errors: {
+        form: "The case could not be created. Please try again.",
+      },
       values: {
         title,
         customerName,
@@ -62,51 +141,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       },
     } satisfies ActionData;
   }
-
-  const shopInstallation = await db.shopInstallation.upsert({
-    where: { shopDomain: session.shop },
-    update: {},
-    create: {
-      shopDomain: session.shop,
-      appName: "Quote Approval App",
-    },
-  });
-
-  const existingCount = await db.approvalCase.count({
-    where: { shopInstallationId: shopInstallation.id },
-  });
-
-  const newCase = await db.approvalCase.create({
-    data: {
-      shopInstallationId: shopInstallation.id,
-      externalReference: `CASE-${existingCount + 1}`,
-      title,
-      customerName: customerName || null,
-      customerEmail: customerEmail || null,
-      currencyCode: "USD",
-      revisions: {
-        create: {
-          revisionNumber: 1,
-          summary: "Initial merchant-created revision",
-          payloadJson: JSON.stringify({
-            title,
-            customerName,
-            customerEmail,
-            createdFrom: "new-case-page",
-          }),
-        },
-      },
-      actions: {
-        create: {
-          actorType: "MERCHANT",
-          actionType: "CREATE_CASE",
-          note: "Approval case created from new case page",
-        },
-      },
-    },
-  });
-
-  return redirect(`/app/cases/${newCase.id}`);
 };
 
 export default function NewCasePage() {
@@ -210,6 +244,12 @@ export default function NewCasePage() {
             ) : null}
           </div>
 
+          {actionData?.errors?.form ? (
+            <p style={{ color: "crimson", margin: 0 }}>
+              {actionData.errors.form}
+            </p>
+          ) : null}
+
           <div>
             <button type="submit" disabled={isSubmitting}>
               {isSubmitting ? "Creating..." : "Create approval case"}
@@ -217,6 +257,40 @@ export default function NewCasePage() {
           </div>
         </div>
       </Form>
+    </div>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  let title = "New case page unavailable";
+  let message = "The new case page could not be loaded.";
+
+  if (isRouteErrorResponse(error)) {
+    title = `Request failed (${error.status})`;
+    message =
+      typeof error.data === "string"
+        ? error.data
+        : "The new case page could not be loaded.";
+  }
+
+  return (
+    <div
+      style={{
+        border: "1px solid #FECACA",
+        borderRadius: "16px",
+        background: "#FEF2F2",
+        padding: "16px",
+        display: "grid",
+        gap: "12px",
+      }}
+    >
+      <div style={{ fontSize: "18px", fontWeight: 700 }}>{title}</div>
+      <div>{message}</div>
+      <div>
+        <Link to="/app/cases">← Back to cases</Link>
+      </div>
     </div>
   );
 }

@@ -7,15 +7,15 @@
 }
 {% endschema %}
 
-<div class="quote-request-block" id="quote-request-block-{{ block.id }}">
+<div class="quote-request-block" id="quote-request">
   <div style="border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-top: 24px;">
     <h3 style="margin-top: 0;">Angebot anfragen</h3>
     <p>Für dieses Produkt eine Anfrage an das Backoffice senden.</p>
 
     <form
-        id="quote-request-form-{{ block.id }}"
-        method="post"
-        action="/apps/quote-request"
+      id="quote-request-form-{{ block.id }}"
+      method="post"
+      action="/apps/quote-request"
     >
       <input type="hidden" name="productTitle" value="{{ product.title | escape }}">
       <input type="hidden" name="productHandle" value="{{ product.handle | escape }}">
@@ -61,6 +61,8 @@
       </button>
     </form>
 
-    <div id="quote-request-result-{{ block.id }}" style="margin-top: 12px;"></div>
+    <div class="quote-request-result" style="margin-top: 12px;"></div>
   </div>
 </div>
+
+{{ 'quote-request.js' | asset_url | script_tag }}

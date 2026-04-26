@@ -14,6 +14,7 @@ const shopify = shopifyApp({
   scopes: process.env.SCOPES?.split(","),
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
+  useOnlineTokens: true,
   // Temporary type workaround for mismatched Shopify session storage package types.
   // Runtime works; we will align package versions later.
   // @ts-expect-error

@@ -17,6 +17,8 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { logServerError, logServerInfo } from "../lib/log.server";
+import { getCurrentAdminActor } from "../lib/approval-role.server";
+import { hasApprovalPermission, roleLabel } from "../lib/approval-role";
 
 type ActionErrors = {
   summary?: string;
@@ -93,11 +95,21 @@ function getNextStep(status: CaseStatus) {
 function getRemainingSteps(status: CaseStatus) {
   switch (status) {
     case "DRAFT":
-      return ["Optional revisions", "Send for review", "Decision", "Shopify handoff"];
+      return [
+        "Optional revisions",
+        "Send for review",
+        "Decision",
+        "Shopify handoff",
+      ];
     case "SENT_FOR_REVIEW":
       return ["Decision", "Shopify handoff"];
     case "CHANGES_REQUESTED":
-      return ["Add revision", "Send for review again", "Decision", "Shopify handoff"];
+      return [
+        "Add revision",
+        "Send for review again",
+        "Decision",
+        "Shopify handoff",
+      ];
     case "APPROVED":
       return ["Prepare Shopify handoff", "Create Draft Order"];
     case "REJECTED":
@@ -115,7 +127,7 @@ function getRemainingSteps(status: CaseStatus) {
   }
 }
 
-function getStatusBadgeStyle(status: string): React.CSSProperties {
+function getStatusBadgeStyle(status: string) {
   switch (status) {
     case "DRAFT":
       return { background: "#F3F4F6", color: "#374151" };
@@ -186,8 +198,11 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       throw new Response("Approval case not found.", { status: 404 });
     }
 
+    const actor = await getCurrentAdminActor(session, shopInstallation.id);
+
     return {
       approvalCase,
+      actor,
     };
   } catch (error) {
     if (error instanceof Response) throw error;
@@ -227,6 +242,8 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       throw new Response("Shop installation not found.", { status: 404 });
     }
 
+    const actor = await getCurrentAdminActor(session, shopInstallation.id);
+
     const approvalCase = await db.approvalCase.findFirst({
       where: {
         id: caseId,
@@ -249,6 +266,10 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 
       if (!summary) {
         errors.summary = "Revision summary is required.";
+      }
+
+      if (!hasApprovalPermission(actor, "ADD_REVISION")) {
+        errors.form = "You do not have permission to add revisions.";
       }
 
       if (
@@ -298,12 +319,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         route: "app.cases.$caseId",
         caseId: approvalCase.id,
         revisionNumber: nextRevisionNumber,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
     }
 
     if (intent === "sendForReview") {
+      if (!hasApprovalPermission(actor, "SEND_FOR_REVIEW")) {
+        return {
+          errors: {
+            form: "You do not have permission to send cases for review.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
       if (
         approvalCase.status !== "DRAFT" &&
         approvalCase.status !== "CHANGES_REQUESTED"
@@ -339,12 +371,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       logServerInfo("Case sent for review", {
         route: "app.cases.$caseId",
         caseId: approvalCase.id,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
     }
 
     if (intent === "approve") {
+      if (!hasApprovalPermission(actor, "DECIDE")) {
+        return {
+          errors: {
+            form: "You do not have permission to approve cases.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
       if (approvalCase.status !== "SENT_FOR_REVIEW") {
         return {
           errors: {
@@ -374,12 +417,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       logServerInfo("Case approved", {
         route: "app.cases.$caseId",
         caseId: approvalCase.id,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
     }
 
     if (intent === "requestChanges") {
+      if (!hasApprovalPermission(actor, "DECIDE")) {
+        return {
+          errors: {
+            form: "You do not have permission to request changes.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
       if (approvalCase.status !== "SENT_FOR_REVIEW") {
         return {
           errors: {
@@ -409,12 +463,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       logServerInfo("Changes requested", {
         route: "app.cases.$caseId",
         caseId: approvalCase.id,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
     }
 
     if (intent === "reject") {
+      if (!hasApprovalPermission(actor, "DECIDE")) {
+        return {
+          errors: {
+            form: "You do not have permission to reject cases.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
       if (approvalCase.status !== "SENT_FOR_REVIEW") {
         return {
           errors: {
@@ -444,12 +509,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       logServerInfo("Case rejected", {
         route: "app.cases.$caseId",
         caseId: approvalCase.id,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
     }
 
     if (intent === "prepareHandoff") {
+      if (!hasApprovalPermission(actor, "PREPARE_HANDOFF")) {
+        return {
+          errors: {
+            form: "You do not have permission to prepare Shopify handoff.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
       if (approvalCase.status !== "APPROVED") {
         return {
           errors: {
@@ -479,12 +555,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       logServerInfo("Shopify handoff prepared", {
         route: "app.cases.$caseId",
         caseId: approvalCase.id,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
     }
 
     if (intent === "createDraftOrder") {
+      if (!hasApprovalPermission(actor, "CREATE_DRAFT_ORDER")) {
+        return {
+          errors: {
+            form: "You do not have permission to create Shopify draft orders.",
+          },
+          values: { summary: "" },
+        } satisfies ActionData;
+      }
+
       if (approvalCase.status !== "APPROVED") {
         return {
           errors: {
@@ -612,6 +699,8 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         caseId: approvalCase.id,
         draftOrderId: draftOrder.id,
         draftOrderName: draftOrder.name,
+        actorEmail: actor.email,
+        actorRole: actor.role,
       });
 
       return redirect(`/app/cases/${approvalCase.id}`);
@@ -639,7 +728,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 };
 
 export default function ApprovalCaseDetail() {
-  const { approvalCase } = useLoaderData<typeof loader>();
+  const { approvalCase, actor } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>() as ActionData | undefined;
   const navigation = useNavigation();
 
@@ -664,20 +753,37 @@ export default function ApprovalCaseDetail() {
   const remainingSteps = getRemainingSteps(status);
 
   const canSendForReview =
-    approvalCase.status === "DRAFT" ||
-    approvalCase.status === "CHANGES_REQUESTED";
-  const canApprove = approvalCase.status === "SENT_FOR_REVIEW";
-  const canRequestChanges = approvalCase.status === "SENT_FOR_REVIEW";
-  const canReject = approvalCase.status === "SENT_FOR_REVIEW";
+    hasApprovalPermission(actor, "SEND_FOR_REVIEW") &&
+    (approvalCase.status === "DRAFT" ||
+      approvalCase.status === "CHANGES_REQUESTED");
+
+  const canApprove =
+    hasApprovalPermission(actor, "DECIDE") &&
+    approvalCase.status === "SENT_FOR_REVIEW";
+
+  const canRequestChanges =
+    hasApprovalPermission(actor, "DECIDE") &&
+    approvalCase.status === "SENT_FOR_REVIEW";
+
+  const canReject =
+    hasApprovalPermission(actor, "DECIDE") &&
+    approvalCase.status === "SENT_FOR_REVIEW";
+
   const canAddRevision =
+    hasApprovalPermission(actor, "ADD_REVISION") &&
     approvalCase.status !== "APPROVED" &&
     approvalCase.status !== "REJECTED" &&
     approvalCase.status !== "DRAFT_ORDER_CREATED" &&
     approvalCase.status !== "INVOICE_SENT" &&
     approvalCase.status !== "CONVERTED_TO_ORDER";
+
   const canPrepareHandoff =
-    approvalCase.status === "APPROVED" && !approvalCase.handoffPreparedAt;
+    hasApprovalPermission(actor, "PREPARE_HANDOFF") &&
+    approvalCase.status === "APPROVED" &&
+    !approvalCase.handoffPreparedAt;
+
   const canCreateDraftOrder =
+    hasApprovalPermission(actor, "CREATE_DRAFT_ORDER") &&
     approvalCase.status === "APPROVED" &&
     !!approvalCase.handoffPreparedAt &&
     !approvalCase.shopifyDraftOrderId;
@@ -704,7 +810,7 @@ export default function ApprovalCaseDetail() {
             {approvalCase.title}
           </div>
 
-          <div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <span
               style={{
                 display: "inline-flex",
@@ -718,6 +824,22 @@ export default function ApprovalCaseDetail() {
               }}
             >
               {formatLabel(approvalCase.status)}
+            </span>
+
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                minHeight: "30px",
+                padding: "4px 12px",
+                borderRadius: "999px",
+                fontSize: "12px",
+                fontWeight: 700,
+                background: "#F3F4F6",
+                color: "#374151",
+              }}
+            >
+              {roleLabel(actor)}
             </span>
           </div>
         </div>
@@ -751,6 +873,7 @@ export default function ApprovalCaseDetail() {
             Overview
           </div>
 
+          <div>Current admin role: {roleLabel(actor)}</div>
           <div>Customer: {approvalCase.customerName || "—"}</div>
           <div>Email: {approvalCase.customerEmail || "—"}</div>
           <div>External reference: {approvalCase.externalReference || "—"}</div>
@@ -949,7 +1072,7 @@ export default function ApprovalCaseDetail() {
                 {isSubmittingCreateDraftOrder
                   ? "Creating draft order..."
                   : "Create Draft Order"}
-              </button>
+                </button>
             </Form>
           </div>
         ) : null}

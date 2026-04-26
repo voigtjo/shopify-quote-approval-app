@@ -16,6 +16,8 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { logServerError, logServerInfo } from "../lib/log.server";
+import { getCurrentAdminActor } from "../lib/approval-role.server";
+import { hasApprovalPermission } from "../lib/approval-role";
 
 type ActionErrors = {
   title?: string;
@@ -81,6 +83,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       },
     });
 
+    const actor = await getCurrentAdminActor(session, shopInstallation.id);
+
+    if (!hasApprovalPermission(actor, "CREATE_CASE")) {
+      return {
+        errors: {
+          form: "You do not have permission to create approval cases.",
+        },
+        values: {
+          title,
+          customerName,
+          customerEmail,
+        },
+      } satisfies ActionData;
+    }
+
     const existingCount = await db.approvalCase.count({
       where: { shopInstallationId: shopInstallation.id },
     });
@@ -120,6 +137,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       caseId: newCase.id,
       shop: session.shop,
       title,
+      actorEmail: actor.email,
+      actorRole: actor.role,
     });
 
     return redirect(`/app/cases/${newCase.id}`);

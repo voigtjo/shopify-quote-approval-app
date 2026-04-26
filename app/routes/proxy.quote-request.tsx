@@ -3,6 +3,49 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { logServerError, logServerInfo } from "../lib/log.server";
 
+function buildRedirectUrl(
+  shopDomain: string,
+  storefrontUrl: string,
+  status: "success" | "error",
+  options?: { caseId?: string; message?: string },
+) {
+  let safeUrl: URL;
+
+  try {
+    const parsed = new URL(storefrontUrl);
+    if (parsed.hostname !== shopDomain) {
+      safeUrl = new URL(`https://${shopDomain}`);
+    } else {
+      safeUrl = parsed;
+    }
+  } catch {
+    safeUrl = new URL(`https://${shopDomain}`);
+  }
+
+  safeUrl.searchParams.set("quoteRequest", status);
+
+  if (options?.caseId) {
+    safeUrl.searchParams.set("caseId", options.caseId);
+  }
+
+  if (options?.message) {
+    safeUrl.searchParams.set("message", options.message);
+  }
+
+  safeUrl.hash = "quote-request";
+
+  return safeUrl.toString();
+}
+
+function redirectResponse(url: string) {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: url,
+    },
+  });
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.public.appProxy(request);
 
@@ -13,6 +56,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
+  let storefrontUrl = "";
+  let productTitle = "";
+  let customerEmail = "";
+
   try {
     const { session } = await authenticate.public.appProxy(request);
 
@@ -28,23 +75,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const formData = await request.formData();
 
-    const productTitle = String(formData.get("productTitle") || "").trim();
+    storefrontUrl = String(formData.get("storefrontUrl") || "").trim();
+    productTitle = String(formData.get("productTitle") || "").trim();
     const productHandle = String(formData.get("productHandle") || "").trim();
     const customerName = String(formData.get("customerName") || "").trim();
-    const customerEmail = String(formData.get("customerEmail") || "").trim();
+    customerEmail = String(formData.get("customerEmail") || "").trim();
     const requestText = String(formData.get("requestText") || "").trim();
-    const storefrontUrl = String(formData.get("storefrontUrl") || "").trim();
 
     if (!productTitle || !customerEmail || !requestText) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: "Product, customer email, and request text are required.",
+      return redirectResponse(
+        buildRedirectUrl(session.shop, storefrontUrl, "error", {
+          message: "Bitte Produkt, E-Mail und Anforderung ausfüllen.",
         }),
-        {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        },
       );
     }
 
@@ -102,21 +144,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       customerEmail,
     });
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
+    return redirectResponse(
+      buildRedirectUrl(session.shop, storefrontUrl, "success", {
         caseId: approvalCase.id,
-        message: "Your request was submitted successfully.",
+        message: "Ihre Anfrage wurde erfolgreich gesendet.",
       }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      },
     );
   } catch (error) {
     logServerError("Storefront quote request failed", error, {
       route: "proxy.quote-request",
+      storefrontUrl,
+      productTitle,
+      customerEmail,
     });
+
+    const shopDomain =
+      request.headers.get("x-shopify-shop-domain") ||
+      request.headers.get("shopify-shop-domain") ||
+      "";
+
+    if (storefrontUrl && shopDomain) {
+      return redirectResponse(
+        buildRedirectUrl(shopDomain, storefrontUrl, "error", {
+          message: "Die Anfrage konnte nicht gesendet werden.",
+        }),
+      );
+    }
 
     return new Response(
       JSON.stringify({

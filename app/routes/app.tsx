@@ -57,6 +57,7 @@ export default function App() {
 
   const isDashboard = pathname === "/app" || pathname === "/app/";
   const isNewCase = pathname === "/app/cases/new";
+  const isRoles = pathname === "/app/settings/roles";
   const isCases =
     (pathname === "/app/cases" || pathname.startsWith("/app/cases/")) &&
     !isNewCase;
@@ -100,6 +101,11 @@ export default function App() {
             <NavButton to="/app" label="Dashboard" active={isDashboard} />
             <NavButton to="/app/cases" label="Cases" active={isCases} />
             <NavButton to="/app/cases/new" label="New Case" active={isNewCase} />
+            <NavButton
+              to="/app/settings/roles"
+              label="Roles"
+              active={isRoles}
+            />
           </div>
         </div>
 
